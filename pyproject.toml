@@ -1,0 +1,7 @@
+[project]
+name = "leap"
+version = "0.1.0"
+description = "LEAP (Loss-tolerant, Energy-aware Asymmetric Pipeline) - LLM Inference on Heterogenous Systems"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = []

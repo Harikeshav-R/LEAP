@@ -88,3 +88,45 @@ std::string Tokenizer::decode(const std::vector<int> &tokens) const {
     }
     return result;
 }
+
+
+void Tokenizer::export_tokenized_binary_file() const {
+    std::string output_path = model_path_.substr(0, model_path_.find_last_of('.')) + ".bin";
+    std::ofstream out(output_path, std::ios::binary);
+    if (!out) {
+        throw std::runtime_error("Failed to open output file: " + output_path);
+    }
+
+    std::vector<std::string> tokens;
+    std::vector<float> scores;
+    tokens.reserve(n_words_);
+    scores.reserve(n_words_);
+
+    size_t max_token_length = 0;
+
+    for (uint64_t i = 0; i < n_words_; ++i) {
+        auto res = model_->id_to_piece(i);
+        if (!res.ok()) {
+            // If we can't decode a token, it might be an issue, but for now we throw
+            throw std::runtime_error("Failed to get token piece for id " + std::to_string(i));
+        }
+        const std::string &piece = res.get();
+        tokens.push_back(piece);
+        scores.push_back(static_cast<float>(i)); // Score is index
+        if (piece.length() > max_token_length) {
+            max_token_length = piece.length();
+        }
+    }
+
+    auto max_len_u32 = static_cast<uint32_t>(max_token_length);
+    out.write(reinterpret_cast<const char *>(&max_len_u32), sizeof(max_len_u32));
+
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        float score = scores[i];
+        auto len = static_cast<uint32_t>(tokens[i].length());
+        out.write(reinterpret_cast<const char *>(&score), sizeof(score));
+        out.write(reinterpret_cast<const char *>(&len), sizeof(len));
+        out.write(tokens[i].data(), len);
+    }
+    out.close();
+}

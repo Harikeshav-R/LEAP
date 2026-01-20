@@ -4,6 +4,12 @@ project(LEAP)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release)
+endif()
+
+set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -march=native -O3")
+
 # ------------------------------------------------------------------------------
 # 1. Dependency Setup
 # ------------------------------------------------------------------------------
@@ -45,7 +51,9 @@ endif ()
 # 2. Define Executables
 # ------------------------------------------------------------------------------
 
-add_executable(tokenizer src/tokenizer/main.cpp)
+add_executable(tokenizer src/tokenizer/main.cpp
+        src/tokenizer/Tokenizer.cpp
+        src/tokenizer/Tokenizer.h)
 add_executable(inference src/inference/main.cpp)
 
 # ------------------------------------------------------------------------------
@@ -60,6 +68,7 @@ target_link_libraries(tokenizer PRIVATE "${TORCH_LIBRARIES}" tokenizers)
 # Needs: OpenMP Only (No Torch)
 # If inference needs the tokenizer library, add 'tokenizers' here too.
 # target_link_libraries(inference PRIVATE tokenizers)
+target_compile_options(inference PRIVATE $<$<CONFIG:Release>:-ffast-math>)
 
 # ------------------------------------------------------------------------------
 # 4. OpenMP Linking (Shared Logic)

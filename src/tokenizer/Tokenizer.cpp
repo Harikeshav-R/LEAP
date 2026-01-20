@@ -78,3 +78,13 @@ std::vector<int> Tokenizer::encode(const std::string &s, const bool bos, const b
     return tokens;
 }
 
+std::string Tokenizer::decode(const std::vector<int> &tokens) const {
+    std::string result;
+    for (const int t: tokens) {
+        auto piece_res = model_->id_to_piece(static_cast<uint64_t>(t));
+        if (piece_res.ok()) {
+            result += piece_res.get();
+        }
+    }
+    return result;
+}

@@ -67,3 +67,14 @@ Tokenizer::Tokenizer(const std::string &model_path) : model_path_(model_path) {
     stop_tokens_.insert(eot_id);
 }
 
+std::vector<int> Tokenizer::encode(const std::string &s, const bool bos, const bool eos) const {
+    auto res = model_->encode(s, bos ? 1 : 0, eos ? 1 : 0);
+    if (!res.ok()) {
+        throw std::runtime_error("Failed to encode string");
+    }
+    std::vector<uint64_t> u64_tokens = res.get();
+    // Convert to int
+    std::vector<int> tokens(u64_tokens.begin(), u64_tokens.end());
+    return tokens;
+}
+

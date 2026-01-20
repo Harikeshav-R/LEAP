@@ -3,7 +3,8 @@ project(LEAP)
 
 set(CMAKE_CXX_STANDARD 20)
 
-add_executable(LEAP main.cpp)
+add_executable(tokenizer src/tokenizer/main.cpp)
+add_executable(inference src/inference/main.cpp)
 
 if (APPLE)
     find_program(BREW_PROG brew)
@@ -23,17 +24,17 @@ if (APPLE)
         message(STATUS "Found Homebrew OpenMP at: ${LIBOMP_PREFIX}")
 
         # 2. Add the include headers (omp.h)
-        target_include_directories(LEAP PRIVATE ${LIBOMP_PREFIX}/include)
+        target_include_directories(inference PRIVATE ${LIBOMP_PREFIX}/include)
 
         # 3. Add the library search path
-        target_link_directories(LEAP PRIVATE ${LIBOMP_PREFIX}/lib)
+        target_link_directories(inference PRIVATE ${LIBOMP_PREFIX}/lib)
 
         # 4. Add the specific flags Apple Clang needs
         # We must use -Xpreprocessor because Apple Clang doesn't natively recognize -fopenmp
-        target_compile_options(LEAP PRIVATE -Xpreprocessor -fopenmp)
+        target_compile_options(inference PRIVATE -Xpreprocessor -fopenmp)
 
         # 5. Link the library (libomp.dylib)
-        target_link_libraries(LEAP PRIVATE omp)
+        target_link_libraries(inference PRIVATE omp)
 
     else ()
         message(FATAL_ERROR "Could not find libomp. Please run: brew install libomp")
@@ -42,5 +43,5 @@ if (APPLE)
     # --- Standard Setup (Linux/Windows) ---
 else ()
     find_package(OpenMP REQUIRED)
-    target_link_libraries(LEAP PRIVATE OpenMP::OpenMP_CXX)
+    target_link_libraries(inference PRIVATE OpenMP::OpenMP_CXX)
 endif ()

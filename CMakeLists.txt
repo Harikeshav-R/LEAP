@@ -4,9 +4,9 @@ project(LEAP)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-if(NOT CMAKE_BUILD_TYPE)
+if (NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
-endif()
+endif ()
 
 set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -march=native -O3")
 
@@ -51,10 +51,15 @@ endif ()
 # 2. Define Executables
 # ------------------------------------------------------------------------------
 
-add_executable(tokenizer src/tokenizer/main.cpp
+add_executable(tokenizer
+        src/tokenizer/main.cpp
         src/tokenizer/Tokenizer.cpp
         src/tokenizer/Tokenizer.h)
-add_executable(inference src/inference/main.cpp)
+add_executable(inference
+        src/inference/main.cpp)
+add_executable(export
+        src/export/main.cpp
+)
 
 # ------------------------------------------------------------------------------
 # 3. Link Dependencies
@@ -62,7 +67,7 @@ add_executable(inference src/inference/main.cpp)
 
 # --- Target: Tokenizer ---
 # Needs: LibTorch + Tokenizers Lib + OpenMP
-target_link_libraries(tokenizer PRIVATE "${TORCH_LIBRARIES}" tokenizers)
+target_link_libraries(tokenizer PRIVATE ${TORCH_LIBRARIES} tokenizers)
 
 # --- Target: Inference ---
 # Needs: OpenMP Only (No Torch)
@@ -70,11 +75,15 @@ target_link_libraries(tokenizer PRIVATE "${TORCH_LIBRARIES}" tokenizers)
 # target_link_libraries(inference PRIVATE tokenizers)
 target_compile_options(inference PRIVATE $<$<CONFIG:Release>:-ffast-math>)
 
+# --- Target: Export ---
+# Needs: LibTorch + OpenMP
+target_link_libraries(export PRIVATE ${TORCH_LIBRARIES})
+
 # ------------------------------------------------------------------------------
 # 4. OpenMP Linking (Shared Logic)
 # ------------------------------------------------------------------------------
 
-set(OMP_TARGETS tokenizer inference)
+set(OMP_TARGETS tokenizer inference export)
 
 foreach (TARGET_NAME ${OMP_TARGETS})
     if (APPLE AND USE_CUSTOM_OMP)

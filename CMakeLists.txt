@@ -72,6 +72,8 @@ add_library(model
         src/model/Attention.h
         src/model/FeedForward.cpp
         src/model/FeedForward.h
+        src/model/TransformerBlock.cpp
+        src/model/TransformerBlock.h
 )
 
 add_executable(tokenizer

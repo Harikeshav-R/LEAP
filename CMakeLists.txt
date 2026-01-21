@@ -74,6 +74,8 @@ add_library(model
         src/model/FeedForward.h
         src/model/TransformerBlock.cpp
         src/model/TransformerBlock.h
+        src/model/Transformer.cpp
+        src/model/Transformer.h
 )
 
 add_executable(tokenizer

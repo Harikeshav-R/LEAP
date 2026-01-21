@@ -120,5 +120,64 @@ namespace Model {
         return logits;
     }
 
+    std::unique_ptr<torch::optim::AdamW> TransformerImpl::configure_optimizers(
+        double weight_decay,
+        double learning_rate,
+        std::pair<double, double> betas,
+        const std::string &device_type
+    ) const {
+        // Collect parameters
+        std::vector<torch::Tensor> decay_params;
+        std::vector<torch::Tensor> nodecay_params;
 
+        for (auto named_params = this->named_parameters(true); auto &k_v: named_params) {
+            auto &p = k_v.value();
+            if (!p.requires_grad()) continue;
+
+            // Simple heuristic: dim >= 2 decays, otherwise (biases, norms) doesn't
+            if (p.dim() >= 2) {
+                decay_params.push_back(p);
+            } else {
+                nodecay_params.push_back(p);
+            }
+        }
+
+        int64_t num_decay = 0;
+        for (const auto &p: decay_params) num_decay += p.numel();
+
+        int64_t num_nodecay = 0;
+        for (const auto &p: nodecay_params) num_nodecay += p.numel();
+
+        std::cout << "num decayed parameter tensors: " << decay_params.size()
+                << ", with " << num_decay << " parameters" << std::endl;
+        std::cout << "num non-decayed parameter tensors: " << nodecay_params.size()
+                << ", with " << num_nodecay << " parameters" << std::endl;
+
+        // Create optimizer groups
+        std::vector<torch::optim::OptimizerParamGroup> groups;
+
+        auto decay_opts = std::make_unique<torch::optim::AdamWOptions>(learning_rate);
+        decay_opts->weight_decay(weight_decay);
+        decay_opts->betas(betas);
+        groups.emplace_back(decay_params, std::move(decay_opts));
+
+        auto nodecay_opts = std::make_unique<torch::optim::AdamWOptions>(learning_rate);
+        nodecay_opts->weight_decay(0.0);
+        nodecay_opts->betas(betas);
+        groups.emplace_back(nodecay_params, std::move(nodecay_opts));
+
+        // Fused AdamW check is implicit in LibTorch backend implementations mostly,
+        // explicit "fused" flag isn't strictly exposed in the high-level C++ Options API
+        // the same way as Python, but standard AdamW in LibTorch is highly optimized.
+
+        // Note: The C++ AdamW constructor requires generic OptimizerOptions as the default,
+        // but since we provided per-group options, the default passed to constructor is less critical
+        // provided the groups cover all params.
+
+        torch::optim::AdamWOptions defaults(learning_rate);
+        defaults.betas(betas);
+        defaults.weight_decay(weight_decay);
+
+        return std::make_unique<torch::optim::AdamW>(groups, defaults);
+    }
 } // namespace Model

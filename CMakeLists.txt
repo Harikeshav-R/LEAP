@@ -14,14 +14,14 @@ set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -march=native -O3")
 # 1. Dependency Setup
 # ------------------------------------------------------------------------------
 
-# --- LibTorch (Only needed for tokenizer target) ---
+# --- LibTorch ---
 set(CMAKE_PREFIX_PATH "${CMAKE_SOURCE_DIR}/third-party/libtorch" ${CMAKE_PREFIX_PATH})
 find_package(Torch REQUIRED)
 
 # --- Tokenizers ---
 add_subdirectory(third-party/tokenizers)
 
-# --- OpenMP Configuration (Required for both) ---
+# --- OpenMP Configuration (Required for all) ---
 set(USE_CUSTOM_OMP OFF)
 if (APPLE)
     find_program(BREW_PROG brew)
@@ -48,26 +48,37 @@ else ()
 endif ()
 
 # ------------------------------------------------------------------------------
-# 2. Define Executables
+# 2. Define Executables & Libraries
 # ------------------------------------------------------------------------------
+
+add_executable(export
+        src/export/main.cpp
+        src/model/ModelArgs.h
+)
+
+target_include_directories(export PRIVATE third-party/tokenizers/third-party/json/single_include ${CMAKE_CURRENT_SOURCE_DIR}/src)
+
+add_executable(inference
+        src/inference/main.cpp
+)
+
+add_library(model
+        src/model/ModelArgs.h
+)
 
 add_executable(tokenizer
         src/tokenizer/main.cpp
         src/tokenizer/Tokenizer.cpp
-        src/tokenizer/Tokenizer.h)
-add_executable(inference
-        src/inference/main.cpp)
-add_executable(export
-        src/export/main.cpp
+        src/tokenizer/Tokenizer.h
 )
 
 # ------------------------------------------------------------------------------
 # 3. Link Dependencies
 # ------------------------------------------------------------------------------
 
-# --- Target: Tokenizer ---
-# Needs: LibTorch + Tokenizers Lib + OpenMP
-target_link_libraries(tokenizer PRIVATE ${TORCH_LIBRARIES} tokenizers)
+# --- Target: Export ---
+# Needs: LibTorch + OpenMP
+target_link_libraries(export PRIVATE ${TORCH_LIBRARIES} model)
 
 # --- Target: Inference ---
 # Needs: OpenMP Only (No Torch)
@@ -75,15 +86,20 @@ target_link_libraries(tokenizer PRIVATE ${TORCH_LIBRARIES} tokenizers)
 # target_link_libraries(inference PRIVATE tokenizers)
 target_compile_options(inference PRIVATE $<$<CONFIG:Release>:-ffast-math>)
 
-# --- Target: Export ---
-# Needs: LibTorch + OpenMP
-target_link_libraries(export PRIVATE ${TORCH_LIBRARIES})
+# --- Target: Model ---
+# Needs: LibTorch
+target_include_directories(model PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/model)
+target_link_libraries(model PUBLIC ${TORCH_LIBRARIES})
+
+# --- Target: Tokenizer ---
+# Needs: LibTorch + Tokenizers Lib + OpenMP
+target_link_libraries(tokenizer PRIVATE ${TORCH_LIBRARIES} tokenizers)
 
 # ------------------------------------------------------------------------------
 # 4. OpenMP Linking (Shared Logic)
 # ------------------------------------------------------------------------------
 
-set(OMP_TARGETS tokenizer inference export)
+set(OMP_TARGETS export inference model tokenizer)
 
 foreach (TARGET_NAME ${OMP_TARGETS})
     if (APPLE AND USE_CUSTOM_OMP)

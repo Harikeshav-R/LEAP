@@ -77,4 +77,48 @@ namespace Model {
             torch::nn::init::normal_(embedding->weight, 0.0, 0.02);
         }
     }
+
+    torch::Tensor TransformerImpl::forward(const torch::Tensor &tokens, const torch::optional<torch::Tensor> &targets) {
+        auto bsz = tokens.size(0);
+        auto seqlen = tokens.size(1);
+
+        auto h = tok_embeddings->forward(tokens);
+        h = dropout->forward(h);
+
+        // Slice freqs for the current sequence length
+        const auto current_freqs_cos = freqs_cos.slice(0, 0, seqlen);
+        const auto current_freqs_sin = freqs_sin.slice(0, 0, seqlen);
+
+        for (auto &layer: layers) {
+            h = layer->forward(h, current_freqs_cos, current_freqs_sin);
+        }
+        h = norm->forward(h);
+
+        torch::Tensor logits;
+
+        if (targets.has_value()) {
+            // Calculate loss
+            logits = output->forward(h);
+
+            // View logic for Cross Entropy
+            const auto logits_view = logits.view({-1, logits.size(-1)});
+            const auto targets_view = targets.value().view({-1});
+
+            this->last_loss = torch::nn::functional::cross_entropy(
+                logits_view,
+                targets_view,
+                torch::nn::functional::CrossEntropyFuncOptions().ignore_index(-1)
+            );
+        } else {
+            // Inference-time optimization: only forward last position
+            // h[:, [-1], :] using slice
+            const auto last_h = h.slice(1, -1); // equivalent to [:,-1:,:] but keeps dim
+            logits = output->forward(last_h);
+            this->last_loss = torch::nullopt;
+        }
+
+        return logits;
+    }
+
+
 } // namespace Model

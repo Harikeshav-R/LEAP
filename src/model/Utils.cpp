@@ -1,10 +1,6 @@
-//
-// Created by Harikeshav Rameshkumar on 1/21/26.
-//
-
 #include "Utils.h"
 
-namespace Models {
+namespace Model {
     std::pair<torch::Tensor, torch::Tensor> precompute_freqs_cis(
         const int64_t dim,
         const int64_t end,

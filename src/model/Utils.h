@@ -1,13 +1,9 @@
-//
-// Created by Harikeshav Rameshkumar on 1/21/26.
-//
-
 #ifndef LEAP_UTILS_H
 #define LEAP_UTILS_H
 
 #include <torch/torch.h>
 
-namespace Models {
+namespace Model {
     std::pair<torch::Tensor, torch::Tensor> precompute_freqs_cis(
         int64_t dim,
         int64_t end,

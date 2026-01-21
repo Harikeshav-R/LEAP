@@ -54,6 +54,8 @@ endif ()
 add_executable(export
         src/export/main.cpp
         src/model/ModelArgs.h
+        src/export/Utils.cpp
+        src/export/Utils.h
 )
 
 target_include_directories(export PRIVATE third-party/tokenizers/third-party/json/single_include ${CMAKE_CURRENT_SOURCE_DIR}/src)

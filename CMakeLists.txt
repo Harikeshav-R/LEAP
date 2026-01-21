@@ -68,6 +68,8 @@ add_library(model
         src/model/RMSNorm.h
         src/model/Utils.cpp
         src/model/Utils.h
+        src/model/Attention.cpp
+        src/model/Attention.h
 )
 
 add_executable(tokenizer

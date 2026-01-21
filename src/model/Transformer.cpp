@@ -180,4 +180,26 @@ namespace Model {
 
         return std::make_unique<torch::optim::AdamW>(groups, defaults);
     }
+
+    double TransformerImpl::estimate_mfu(const int64_t fwdbwd_per_iter, const double dt) const {
+        int64_t N = 0;
+        for (const auto &p: this->parameters()) {
+            N += p.numel();
+        }
+
+        auto &cfg = this->params;
+        const int64_t L = cfg.n_layers;
+        const int64_t H = cfg.n_heads;
+        const int64_t Q = cfg.dim / cfg.n_heads;
+        const int64_t T = cfg.max_seq_len;
+
+        const double flops_per_token = 6.0 * N + 12.0 * L * H * Q * T;
+        const double flops_per_fwdbwd = flops_per_token * T;
+        const double flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter;
+
+        const double flops_achieved = flops_per_iter * (1.0 / dt); // per second
+        constexpr double flops_promised = 312e12; // A100 GPU bfloat16 peak flops
+
+        return flops_achieved / flops_promised;
+    }
 } // namespace Model

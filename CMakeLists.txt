@@ -70,6 +70,8 @@ add_library(model
         src/model/Utils.h
         src/model/Attention.cpp
         src/model/Attention.h
+        src/model/FeedForward.cpp
+        src/model/FeedForward.h
 )
 
 add_executable(tokenizer

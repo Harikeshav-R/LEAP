@@ -13,7 +13,7 @@ int main(const int argc, char **argv) {
     std::cout << "Loading model from: " << model_path << std::endl;
 
     try {
-        const Tokenizer tokenizer(model_path);
+        const Tokenizer::Tokenizer tokenizer(model_path);
         std::cout << "Exporting binary model..." << std::endl;
         tokenizer.export_tokenized_binary_file();
         std::cout << "Export complete." << std::endl;

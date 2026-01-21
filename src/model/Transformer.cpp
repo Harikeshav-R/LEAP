@@ -65,5 +65,16 @@ namespace Model {
         last_loss = torch::nullopt;
     }
 
-    
+    void TransformerImpl::_init_weights(torch::nn::Module &module) {
+        if (module.as<torch::nn::Linear>()) {
+            const auto linear = module.as<torch::nn::Linear>();
+            torch::nn::init::normal_(linear->weight, 0.0, 0.02);
+            if (linear->bias.defined()) {
+                torch::nn::init::zeros_(linear->bias);
+            }
+        } else if (module.as<torch::nn::Embedding>()) {
+            const auto embedding = module.as<torch::nn::Embedding>();
+            torch::nn::init::normal_(embedding->weight, 0.0, 0.02);
+        }
+    }
 } // namespace Model

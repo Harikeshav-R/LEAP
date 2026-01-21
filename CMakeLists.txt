@@ -64,6 +64,8 @@ add_executable(inference
 
 add_library(model
         src/model/ModelArgs.h
+        src/model/RMSNorm.cpp
+        src/model/RMSNorm.h
 )
 
 add_executable(tokenizer

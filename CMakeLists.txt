@@ -66,6 +66,8 @@ add_library(model
         src/model/ModelArgs.h
         src/model/RMSNorm.cpp
         src/model/RMSNorm.h
+        src/model/Utils.cpp
+        src/model/Utils.h
 )
 
 add_executable(tokenizer

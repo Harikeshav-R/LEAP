@@ -202,4 +202,60 @@ namespace Model {
 
         return flops_achieved / flops_promised;
     }
+
+    torch::Tensor TransformerImpl::generate(
+        torch::Tensor idx,
+        const int64_t max_new_tokens,
+        const double temperature,
+        const std::optional<int64_t> top_k
+    ) {
+        torch::InferenceMode guard(true); // Equivalent to @torch.inference_mode()
+
+        for (int64_t i = 0; i < max_new_tokens; ++i) {
+            // crop context
+            torch::Tensor idx_cond;
+            if (idx.size(1) <= params.max_seq_len) {
+                idx_cond = idx;
+            } else {
+                idx_cond = idx.slice(1, idx.size(1) - params.max_seq_len, idx.size(1));
+            }
+
+            // forward
+            torch::Tensor logits = this->forward(idx_cond);
+
+            // pluck logits at final step: logits[:, -1, :]
+            logits = logits.select(1, -1);
+
+            torch::Tensor idx_next;
+
+            if (temperature == 0.0) {
+                // greedy sampling
+                auto max_result = logits.topk(1, -1);
+                idx_next = std::get<1>(max_result); // indices
+            } else {
+                logits = logits / temperature;
+
+                if (top_k.has_value()) {
+                    int64_t k = std::min(top_k.value(), logits.size(-1));
+                    auto topk_result = logits.topk(k);
+                    auto v = std::get<0>(topk_result); // values
+
+                    // logits[logits < v[:, [-1]]] = -Inf
+                    // In C++, we can use masked_fill or where.
+                    auto pivot = v.select(1, -1).unsqueeze(1);
+                    logits = torch::where(logits < pivot,
+                                          torch::tensor(-std::numeric_limits<float>::infinity(), logits.options()),
+                                          logits);
+                }
+
+                auto probs = torch::nn::functional::softmax(logits, -1);
+                idx_next = torch::multinomial(probs, 1);
+            }
+
+            // concat
+            idx = torch::cat({idx, idx_next}, 1);
+        }
+
+        return idx;
+    }
 } // namespace Model

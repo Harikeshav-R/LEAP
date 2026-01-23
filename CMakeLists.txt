@@ -14,6 +14,14 @@ set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -march=native -O3")
 # 1. Dependency Setup
 # ------------------------------------------------------------------------------
 
+# --- Json ---
+include(FetchContent)
+FetchContent_Declare(
+        json
+        URL https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz
+)
+FetchContent_MakeAvailable(json)
+
 # --- LibTorch ---
 set(CMAKE_PREFIX_PATH "${CMAKE_SOURCE_DIR}/third-party/libtorch" ${CMAKE_PREFIX_PATH})
 find_package(Torch REQUIRED)
@@ -92,7 +100,7 @@ add_executable(tokenizer
 
 # --- Target: Export ---
 # Needs: LibTorch + OpenMP
-target_link_libraries(export PRIVATE ${TORCH_LIBRARIES} model)
+target_link_libraries(export PRIVATE ${TORCH_LIBRARIES} model nlohmann_json::nlohmann_json)
 
 # --- Target: Inference ---
 # Needs: OpenMP Only (No Torch)

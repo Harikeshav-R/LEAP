@@ -158,6 +158,10 @@ target_link_libraries(model PUBLIC ${TORCH_LIBRARIES})
 # Needs: LibTorch + Tokenizers Lib + OpenMP
 target_link_libraries(tokenizer PRIVATE ${TORCH_LIBRARIES} tokenizers)
 
+target_compile_options(export PRIVATE -fexceptions)
+target_compile_options(model PRIVATE -fexceptions)
+target_compile_options(tokenizer PRIVATE -fexceptions)
+
 # ------------------------------------------------------------------------------
 # 4. OpenMP Linking (Shared Logic)
 # ------------------------------------------------------------------------------

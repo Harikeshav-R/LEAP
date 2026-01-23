@@ -21,6 +21,14 @@ namespace Model {
             const torch::Tensor &freqs_sin
         );
 
+        // Submodules
+        torch::nn::Linear wq{nullptr};
+        torch::nn::Linear wk{nullptr};
+        torch::nn::Linear wv{nullptr};
+        torch::nn::Linear wo{nullptr};
+        torch::nn::Dropout attn_dropout{nullptr};
+        torch::nn::Dropout resid_dropout{nullptr};
+
     private:
         int n_heads;
         int n_kv_heads;
@@ -29,14 +37,6 @@ namespace Model {
         int n_rep;
         int head_dim;
         float dropout_prob;
-
-        // Sub-modules
-        torch::nn::Linear wq{nullptr};
-        torch::nn::Linear wk{nullptr};
-        torch::nn::Linear wv{nullptr};
-        torch::nn::Linear wo{nullptr};
-        torch::nn::Dropout attn_dropout{nullptr};
-        torch::nn::Dropout resid_dropout{nullptr};
 
         // Buffer
         torch::Tensor mask;

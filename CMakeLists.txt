@@ -43,6 +43,13 @@ if (TORCH_CXX_FLAGS)
     string(REPLACE "-fno-exceptions" "" TORCH_CXX_FLAGS "${TORCH_CXX_FLAGS}")
 endif ()
 
+if (CMAKE_CXX_FLAGS_RELEASE)
+    string(REPLACE "-fno-exceptions" "" CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}")
+endif ()
+# ================
+
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fexceptions")
+
 # Force exceptions globally to be safe
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fexceptions")
 

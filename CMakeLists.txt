@@ -26,7 +26,7 @@ FetchContent_MakeAvailable(json)
 FetchContent_Declare(
         safetensors_cpp
         GIT_REPOSITORY https://github.com/syoyo/safetensors-cpp
-        GIT_TAG        main  # Or a specific commit hash for stability
+        GIT_TAG main  # Or a specific commit hash for stability
 )
 FetchContent_MakeAvailable(safetensors_cpp)
 
@@ -68,11 +68,16 @@ endif ()
 # ------------------------------------------------------------------------------
 
 add_executable(export
-        src/export/main.cpp
-        src/export/Utils.cpp
-        src/export/Utils.h
+        src/export/Export.cpp
+        src/export/Export.h
+
         src/export/Loader.cpp
         src/export/Loader.h
+
+        src/export/main.cpp
+
+        src/export/Utils.cpp
+        src/export/Utils.h
 )
 
 target_include_directories(export PRIVATE third-party/tokenizers/third-party/json/single_include ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -82,23 +87,30 @@ add_executable(inference
 )
 
 add_library(model
-        src/model/ModelArgs.h
-        src/model/RMSNorm.cpp
-        src/model/RMSNorm.h
-        src/model/Utils.cpp
-        src/model/Utils.h
         src/model/Attention.cpp
         src/model/Attention.h
+
         src/model/FeedForward.cpp
         src/model/FeedForward.h
+
+        src/model/ModelArgs.h
+
+        src/model/RMSNorm.cpp
+        src/model/RMSNorm.h
+
         src/model/TransformerBlock.cpp
         src/model/TransformerBlock.h
+
         src/model/Transformer.cpp
         src/model/Transformer.h
+
+        src/model/Utils.cpp
+        src/model/Utils.h
 )
 
 add_executable(tokenizer
         src/tokenizer/main.cpp
+
         src/tokenizer/Tokenizer.cpp
         src/tokenizer/Tokenizer.h
 )

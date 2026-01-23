@@ -35,7 +35,7 @@ set(CMAKE_PREFIX_PATH "${CMAKE_SOURCE_DIR}/third-party/libtorch" ${CMAKE_PREFIX_
 find_package(Torch REQUIRED)
 
 # --- Tokenizers ---
-add_subdirectory(third-party/tokenizers)
+add_subdirectory("${CMAKE_SOURCE_DIR}/third-party/tokenizers")
 
 # --- OpenMP Configuration (Required for all) ---
 set(USE_CUSTOM_OMP OFF)

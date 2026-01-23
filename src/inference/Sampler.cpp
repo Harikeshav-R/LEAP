@@ -1,24 +1,13 @@
 #include "Sampler.h"
 #include "Utils.h"
 #include <cmath>
+#include <algorithm>
 
 
 namespace Inference {
     Sampler::Sampler(const int vocab_size, const float temperature, const float topp, const unsigned long long rng_seed)
         : vocab_size(vocab_size), temperature(temperature), topp(topp), rng_state(rng_seed) {
-        probindex = static_cast<ProbIndex *>(malloc(vocab_size * sizeof(ProbIndex)));
-    }
-
-    Sampler::~Sampler() {
-        free(probindex);
-    }
-
-    int Sampler::compare(const void *a, const void *b) {
-        const auto *a_ = static_cast<const ProbIndex *>(a);
-        const auto *b_ = static_cast<const ProbIndex *>(b);
-        if (a_->prob > b_->prob) return -1;
-        if (a_->prob < b_->prob) return 1;
-        return 0;
+        probindex.resize(vocab_size);
     }
 
     int Sampler::sample_argmax(const float *probabilities, const int n) {
@@ -44,10 +33,11 @@ namespace Inference {
         return n - 1;
     }
 
-    int Sampler::sample_topp(const float *probabilities, const int n, const float topp, ProbIndex *probindex,
+    int Sampler::sample_topp(const float *probabilities, const int n, const float topp,
+                             std::vector<ProbIndex> &probindex,
                              const float coin) {
         int n0 = 0;
-        const float cutoff = (1.0f - topp) / (n - 1);
+        const float cutoff = (1.0f - topp) / (static_cast<float>(n) - 1.0f);
         for (int i = 0; i < n; i++) {
             if (probabilities[i] >= cutoff) {
                 probindex[n0].index = i;
@@ -55,7 +45,10 @@ namespace Inference {
                 n0++;
             }
         }
-        qsort(probindex, n0, sizeof(ProbIndex), compare);
+
+        std::sort(probindex.begin(), probindex.begin() + n0, [](const ProbIndex &a, const ProbIndex &b) {
+            return a.prob > b.prob;
+        });
 
         float cumulative_prob = 0.0f;
         int last_idx = n0 - 1;
@@ -88,7 +81,7 @@ namespace Inference {
         }
         float sum = 0.0f;
         for (int i = 0; i < size; i++) {
-            x[i] = expf(x[i] - max_val);
+            x[i] = std::exp(x[i] - max_val);
             sum += x[i];
         }
         for (int i = 0; i < size; i++) {
@@ -105,7 +98,7 @@ namespace Inference {
                 logits[q] /= temperature;
             }
             softmax(logits, vocab_size);
-            const float coin = Utils::random_f32(&rng_state);
+            const float coin = Utils::random_f32(rng_state);
             if (topp <= 0 || topp >= 1) {
                 next = sample_mult(logits, vocab_size, coin);
             } else {

@@ -1,6 +1,8 @@
 #ifndef LEAP_SAMPLER_H
 #define LEAP_SAMPLER_H
 
+#include <vector>
+
 namespace Inference {
     struct ProbIndex {
         float prob;
@@ -11,13 +13,13 @@ namespace Inference {
     public:
         Sampler(int vocab_size, float temperature, float topp, unsigned long long rng_seed);
 
-        ~Sampler();
+        ~Sampler() = default;
 
         int sample(float *logits);
 
     private:
         int vocab_size;
-        ProbIndex *probindex; // buffer used in top-p sampling
+        std::vector<ProbIndex> probindex; // buffer used in top-p sampling
         float temperature;
         float topp;
         unsigned long long rng_state;
@@ -26,9 +28,8 @@ namespace Inference {
 
         static int sample_mult(const float *probabilities, int n, float coin);
 
-        static int sample_topp(const float *probabilities, int n, float topp, ProbIndex *probindex, float coin);
-
-        static int compare(const void *a, const void *b);
+        static int sample_topp(const float *probabilities, int n, float topp, std::vector<ProbIndex> &probindex,
+                               float coin);
     };
 } // namespace Inference
 

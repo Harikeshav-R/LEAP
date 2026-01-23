@@ -1,10 +1,9 @@
 #ifndef LEAP_FLOAT_TRANSFORMER_H
 #define LEAP_FLOAT_TRANSFORMER_H
 
+#include "Config.h"
 #include "Transformer.h"
 #include <vector>
-
-#include "Config.h"
 
 namespace Inference {
     struct FloatTransformerWeights {
@@ -23,23 +22,23 @@ namespace Inference {
     };
 
     struct FloatRunState {
-        float *x;
-        float *xb;
-        float *xb2;
-        float *hb;
-        float *hb2;
-        float *q;
-        float *k;
-        float *v;
-        float *att;
-        float *logits;
-        float *key_cache;
-        float *value_cache;
+        std::vector<float> x;
+        std::vector<float> xb;
+        std::vector<float> xb2;
+        std::vector<float> hb;
+        std::vector<float> hb2;
+        std::vector<float> q;
+        std::vector<float> k;
+        std::vector<float> v;
+        std::vector<float> att;
+        std::vector<float> logits;
+        std::vector<float> key_cache;
+        std::vector<float> value_cache;
     };
 
     class FloatTransformer : public Transformer {
     public:
-        FloatTransformer(const Config &config, int fd, void *mmap_ptr, ssize_t file_size, float *weights_ptr,
+        FloatTransformer(const Config &config, int fd, void *mmap_ptr, size_t file_size, float *weights_ptr,
                          int shared_weights);
 
         ~FloatTransformer() override;
@@ -51,13 +50,11 @@ namespace Inference {
         FloatRunState state{};
         int fd;
         void *mmap_ptr;
-        ssize_t file_size;
+        size_t file_size;
 
         void memory_map_weights(float *ptr, int shared_weights);
 
-        void malloc_run_state();
-
-        void free_run_state() const;
+        void init_run_state();
 
         static void rmsnorm(float *o, const float *x, const float *weight, int size);
 

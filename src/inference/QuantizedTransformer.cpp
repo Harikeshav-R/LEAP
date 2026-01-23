@@ -1,5 +1,6 @@
 #include "QuantizedTransformer.h"
 #include <cmath>
+#include <cstring>
 #include <unistd.h>
 #include <sys/mman.h>
 #include <stdexcept>

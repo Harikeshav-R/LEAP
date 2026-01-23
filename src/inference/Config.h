@@ -1,8 +1,6 @@
 #ifndef LEAP_CONFIG_H
 #define LEAP_CONFIG_H
 
-#include <string>
-
 namespace Inference {
     struct Config {
         int dim; // transformer dimension

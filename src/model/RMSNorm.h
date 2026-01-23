@@ -17,7 +17,7 @@ namespace Model {
 
     // 2. The Wrapper Macro
     // This creates the class 'Model::RMSNorm'
-    TORCH_MODULE(RMSNorm);
+    TORCH_MODULE (RMSNorm);
 } // namespace Model
 
 #endif //LEAP_RMSNORM_H

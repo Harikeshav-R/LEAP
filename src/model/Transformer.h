@@ -62,7 +62,7 @@ namespace Model {
     };
 
     // Value-semantic wrapper
-    TORCH_MODULE(Transformer);
+    TORCH_MODULE (Transformer);
 } // namespace Model
 
 #endif // LEAP_TRANSFORMER_H

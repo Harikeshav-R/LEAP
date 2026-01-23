@@ -13,7 +13,7 @@ namespace Model {
     // --- Attention Module ---
     class AttentionImpl : public torch::nn::Module {
     public:
-        explicit AttentionImpl(const ModelArgs& args);
+        explicit AttentionImpl(const ModelArgs &args);
 
         torch::Tensor forward(
             const torch::Tensor &x,
@@ -44,8 +44,7 @@ namespace Model {
 
     // Use TORCH_MODULE to create a value-semantic wrapper (Attention)
     // that points to the implementation (AttentionImpl).
-    TORCH_MODULE(Attention);
-
+    TORCH_MODULE (Attention);
 } // namespace Model
 
 

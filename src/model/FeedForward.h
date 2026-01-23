@@ -21,7 +21,7 @@ namespace Model {
     };
 
     // TORCH_MODULE generates the 'FeedForward' wrapper class for reference semantics
-    TORCH_MODULE(FeedForward);
+    TORCH_MODULE (FeedForward);
 } // namespace Model
 
 #endif //LEAP_FEEDFORWARD_H

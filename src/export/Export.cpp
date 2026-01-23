@@ -178,7 +178,7 @@ namespace Export {
 #pragma omp parallel for schedule(dynamic)
         for (size_t i = 0; i < weights.size(); ++i) {
             auto result = quantize_q80(weights[i], group_size);
-            results[i] = {std::get<0>(result), std::get<1>(result), std::get<2>(result)};
+            results[i] = {std::get < 0 > (result), std::get < 1 > (result), std::get < 2 > (result)};
         }
 
         std::cout << "Writing quantized weights..." << std::endl;

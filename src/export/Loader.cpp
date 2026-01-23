@@ -134,9 +134,9 @@ namespace Export {
 
         // 3. Load all shards
         std::cout << "Loading " << model_paths.size() << " safetensor files..." << std::endl;
-        std::vector<std::map<std::string, torch::Tensor>> shards(model_paths.size());
+        std::vector<std::map<std::string, torch::Tensor> > shards(model_paths.size());
 
-        #pragma omp parallel for
+#pragma omp parallel for
         for (size_t i = 0; i < model_paths.size(); ++i) {
             shards[i] = load_file(model_paths[i].string());
         }

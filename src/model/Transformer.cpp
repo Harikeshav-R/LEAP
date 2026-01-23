@@ -231,14 +231,14 @@ namespace Model {
             if (temperature == 0.0) {
                 // greedy sampling
                 auto max_result = logits.topk(1, -1);
-                idx_next = std::get<1>(max_result); // indices
+                idx_next = std::get < 1 > (max_result); // indices
             } else {
                 logits = logits / temperature;
 
                 if (top_k.has_value()) {
                     int64_t k = std::min(top_k.value(), logits.size(-1));
                     auto topk_result = logits.topk(k);
-                    auto v = std::get<0>(topk_result); // values
+                    auto v = std::get < 0 > (topk_result); // values
 
                     // logits[logits < v[:, [-1]]] = -Inf
                     // In C++, we can use masked_fill or where.

@@ -29,7 +29,7 @@ namespace Model {
     };
 
     // Wrapper for value semantics
-    TORCH_MODULE(TransformerBlock);
+    TORCH_MODULE (TransformerBlock);
 } // namespace Model
 
 #endif //LEAP_TRANSFORMERBLOCK_H

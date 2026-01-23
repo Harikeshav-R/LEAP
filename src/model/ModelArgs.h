@@ -1,6 +1,7 @@
 #ifndef LEAP_MODELARGS_H
 #define LEAP_MODELARGS_H
 
+#include <cstdint>
 #include <optional>
 
 namespace Model {

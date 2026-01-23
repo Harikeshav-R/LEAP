@@ -2,6 +2,7 @@
 #define LEAP_UTILS_H
 
 
+#include <cstdint>
 #include <torch/torch.h>
 #include <fstream>
 #include <tuple>

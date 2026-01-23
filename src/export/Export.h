@@ -1,6 +1,7 @@
 #ifndef LEAP_EXPORT_H
 #define LEAP_EXPORT_H
 
+#include <cstdint>
 #include <string>
 #include <model/Transformer.h>
 

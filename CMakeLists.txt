@@ -22,6 +22,14 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(json)
 
+# --- SafeTensors ---
+FetchContent_Declare(
+        safetensors_cpp
+        GIT_REPOSITORY https://github.com/syoyo/safetensors-cpp
+        GIT_TAG        main  # Or a specific commit hash for stability
+)
+FetchContent_MakeAvailable(safetensors_cpp)
+
 # --- LibTorch ---
 set(CMAKE_PREFIX_PATH "${CMAKE_SOURCE_DIR}/third-party/libtorch" ${CMAKE_PREFIX_PATH})
 find_package(Torch REQUIRED)
@@ -61,9 +69,10 @@ endif ()
 
 add_executable(export
         src/export/main.cpp
-        src/model/ModelArgs.h
         src/export/Utils.cpp
         src/export/Utils.h
+        src/export/Loader.cpp
+        src/export/Loader.h
 )
 
 target_include_directories(export PRIVATE third-party/tokenizers/third-party/json/single_include ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -100,7 +109,7 @@ add_executable(tokenizer
 
 # --- Target: Export ---
 # Needs: LibTorch + OpenMP
-target_link_libraries(export PRIVATE ${TORCH_LIBRARIES} model nlohmann_json::nlohmann_json)
+target_link_libraries(export PRIVATE ${TORCH_LIBRARIES} model nlohmann_json::nlohmann_json safetensors_cpp)
 
 # --- Target: Inference ---
 # Needs: OpenMP Only (No Torch)

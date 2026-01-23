@@ -165,28 +165,39 @@ namespace Export {
         serialize_fp32(out_file, model->norm->weight);
 
         // 3) Quantize and Write Weights
-        std::vector<float> errors;
+        std::vector<float> errors(weights.size());
+
+        struct QuantResult {
+            torch::Tensor q;
+            torch::Tensor s;
+            float err;
+        };
+        std::vector<QuantResult> results(weights.size());
+
+        std::cout << "Quantizing " << weights.size() << " tensors (Parallel)..." << std::endl;
+#pragma omp parallel for schedule(dynamic)
+        for (size_t i = 0; i < weights.size(); ++i) {
+            auto result = quantize_q80(weights[i], group_size);
+            results[i] = {std::get<0>(result), std::get<1>(result), std::get<2>(result)};
+        }
+
+        std::cout << "Writing quantized weights..." << std::endl;
         for (size_t i = 0; i < weights.size(); ++i) {
             const auto &w = weights[i];
+            const auto &res = results[i];
 
-            // tuple<Tensor, Tensor, float>
-            auto result = quantize_q80(w, group_size);
-            torch::Tensor q = std::get<0>(result);
-            torch::Tensor s = std::get<1>(result);
-            float err = std::get<2>(result);
+            serialize_int8(out_file, res.q);
+            serialize_fp32(out_file, res.s);
 
-            serialize_int8(out_file, q);
-            serialize_fp32(out_file, s);
-
-            errors.push_back(err);
+            errors[i] = res.err;
 
             // Format shape for logging
             std::string shape_str = "(";
             for (int k = 0; k < w.dim(); ++k) shape_str += std::to_string(w.size(k)) + (k < w.dim() - 1 ? ", " : "");
             shape_str += ")";
 
-            std::cout << (i + 1) << "/" << weights.size() << " quantized " << shape_str
-                    << " to Q8_0 with max error " << err << std::endl;
+            std::cout << (i + 1) << "/" << weights.size() << " saved " << shape_str
+                    << " (max error " << res.err << ")" << std::endl;
         }
 
         if (!errors.empty()) {

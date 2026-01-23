@@ -98,31 +98,54 @@ namespace Tokenizer {
             throw std::runtime_error("Failed to open output file: " + output_path);
         }
 
-        std::vector<std::string> tokens;
-        std::vector<float> scores;
-        tokens.reserve(n_words_);
-        scores.reserve(n_words_);
+        std::vector<std::string> tokens(n_words_);
+        std::vector<float> scores(n_words_);
 
         size_t max_token_length = 0;
+        bool error_occurred = false;
 
-        for (uint64_t i = 0; i < n_words_; ++i) {
-            auto res = model_->id_to_piece(i);
-            if (!res.ok()) {
-                // If we can't decode a token, it might be an issue, but for now we throw
-                throw std::runtime_error("Failed to get token piece for id " + std::to_string(i));
+#pragma omp parallel
+        {
+            size_t local_max_len = 0;
+
+#pragma omp for
+            for (uint64_t i = 0; i < n_words_; ++i) {
+                if (error_occurred) continue;
+
+                auto res = model_->id_to_piece(i);
+                if (!res.ok()) {
+#pragma omp critical
+                    {
+                        error_occurred = true;
+                    }
+                    continue;
+                }
+
+                const std::string &piece = res.get();
+                tokens[i] = piece;
+                scores[i] = static_cast<float>(i); // Score is index
+
+                if (piece.length() > local_max_len) {
+                    local_max_len = piece.length();
+                }
             }
-            const std::string &piece = res.get();
-            tokens.push_back(piece);
-            scores.push_back(static_cast<float>(i)); // Score is index
-            if (piece.length() > max_token_length) {
-                max_token_length = piece.length();
+
+#pragma omp critical
+            {
+                if (local_max_len > max_token_length) {
+                    max_token_length = local_max_len;
+                }
             }
+        }
+
+        if (error_occurred) {
+            throw std::runtime_error("Failed to get token piece for one or more ids during export.");
         }
 
         auto max_len_u32 = static_cast<uint32_t>(max_token_length);
         out.write(reinterpret_cast<const char *>(&max_len_u32), sizeof(max_len_u32));
 
-        for (size_t i = 0; i < tokens.size(); ++i) {
+        for (size_t i = 0; i < n_words_; ++i) {
             float score = scores[i];
             auto len = static_cast<uint32_t>(tokens[i].length());
             out.write(reinterpret_cast<const char *>(&score), sizeof(score));

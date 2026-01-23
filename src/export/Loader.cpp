@@ -99,7 +99,8 @@ namespace Export {
         const auto view_shape = std::vector<int64_t>{n_heads, 2, dim1 / n_heads / 2, dim2};
         return w.view(view_shape)
                 .transpose(1, 2)
-                .reshape({dim1, dim2});
+                .reshape({dim1, dim2})
+                .contiguous();
     }
 
     // =========================================================================
@@ -133,10 +134,11 @@ namespace Export {
 
         // 3. Load all shards
         std::cout << "Loading " << model_paths.size() << " safetensor files..." << std::endl;
-        std::vector<std::map<std::string, torch::Tensor> > shards;
-        shards.reserve(model_paths.size());
-        for (const auto &p: model_paths) {
-            shards.push_back(load_file(p.string()));
+        std::vector<std::map<std::string, torch::Tensor>> shards(model_paths.size());
+
+        #pragma omp parallel for
+        for (size_t i = 0; i < model_paths.size(); ++i) {
+            shards[i] = load_file(model_paths[i].string());
         }
 
         // 4. Concat Weights

@@ -66,7 +66,7 @@ namespace Export {
 
         // find the max error across all groups
         // maxerr = err.max().item()
-        float maxerr = err.max().item<float>();
+        auto maxerr = err.max().item<float>();
 
         return std::make_tuple(int8val, scale, maxerr);
     }

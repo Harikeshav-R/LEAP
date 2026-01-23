@@ -83,7 +83,27 @@ add_executable(export
 target_include_directories(export PRIVATE third-party/tokenizers/third-party/json/single_include ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 add_executable(inference
+        src/inference/Config.h
+
+        src/inference/FloatTransformer.cpp
+        src/inference/FloatTransformer.h
+
         src/inference/main.cpp
+
+        src/inference/QuantizedTransformer.cpp
+        src/inference/QuantizedTransformer.h
+
+        src/inference/Sampler.cpp
+        src/inference/Sampler.h
+
+        src/inference/Tokenizer.cpp
+        src/inference/Tokenizer.h
+
+        src/inference/Transformer.h
+
+        src/inference/TransformerFactory.cpp
+
+        src/inference/Utils.h
 )
 
 add_library(model

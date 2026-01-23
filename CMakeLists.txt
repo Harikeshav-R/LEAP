@@ -34,6 +34,18 @@ FetchContent_MakeAvailable(safetensors_cpp)
 set(CMAKE_PREFIX_PATH "${CMAKE_SOURCE_DIR}/third-party/libtorch" ${CMAKE_PREFIX_PATH})
 find_package(Torch REQUIRED)
 
+if (CMAKE_CXX_FLAGS)
+    string(REPLACE "-fno-exceptions" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+endif ()
+
+# Also clean the specific Torch variable if it exists
+if (TORCH_CXX_FLAGS)
+    string(REPLACE "-fno-exceptions" "" TORCH_CXX_FLAGS "${TORCH_CXX_FLAGS}")
+endif ()
+
+# Force exceptions globally to be safe
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fexceptions")
+
 # --- Tokenizers ---
 add_subdirectory("${CMAKE_SOURCE_DIR}/third-party/tokenizers")
 
@@ -157,10 +169,6 @@ target_link_libraries(model PUBLIC ${TORCH_LIBRARIES})
 # --- Target: Tokenizer ---
 # Needs: LibTorch + Tokenizers Lib + OpenMP
 target_link_libraries(tokenizer PRIVATE ${TORCH_LIBRARIES} tokenizers)
-
-target_compile_options(export PRIVATE -fexceptions)
-target_compile_options(model PRIVATE -fexceptions)
-target_compile_options(tokenizer PRIVATE -fexceptions)
 
 # ------------------------------------------------------------------------------
 # 4. OpenMP Linking (Shared Logic)

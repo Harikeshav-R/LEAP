@@ -12,6 +12,10 @@
 #include <arm_neon.h>
 #endif
 
+#if defined(__x86_64__) || defined(_M_X64)
+#include <immintrin.h>
+#endif
+
 namespace Inference {
     QuantizedTransformer::QuantizedTransformer(const Config &config, const int fd, void *mmap_ptr,
                                                const size_t file_size, void *weights_ptr, const int shared_weights,
@@ -132,6 +136,7 @@ namespace Inference {
     void QuantizedTransformer::quantize(const QuantizedTensor *qx, const float *x, const int n) const {
         const int num_groups = n / group_size;
 
+#pragma omp parallel for
         for (int group = 0; group < num_groups; group++) {
             constexpr float Q_MAX = 127.0f;
             float wmax = 0.0f;
@@ -152,6 +157,37 @@ namespace Inference {
             }
             // Reduction for max
             wmax = vmaxnmvq_f32(max_vec);
+#elif defined(__AVX2__)
+            __m256 max_vec = _mm256_setzero_ps();
+            const __m256 abs_mask = _mm256_castsi256_ps(_mm256_set1_epi32(0x7FFFFFFF));
+
+            for (; i <= group_size - 32; i += 32) {
+                __m256 v0 = _mm256_and_ps(_mm256_loadu_ps(x + group * group_size + i), abs_mask);
+                __m256 v1 = _mm256_and_ps(_mm256_loadu_ps(x + group * group_size + i + 8), abs_mask);
+                __m256 v2 = _mm256_and_ps(_mm256_loadu_ps(x + group * group_size + i + 16), abs_mask);
+                __m256 v3 = _mm256_and_ps(_mm256_loadu_ps(x + group * group_size + i + 24), abs_mask);
+
+                max_vec = _mm256_max_ps(max_vec, v0);
+                max_vec = _mm256_max_ps(max_vec, v1);
+                max_vec = _mm256_max_ps(max_vec, v2);
+                max_vec = _mm256_max_ps(max_vec, v3);
+            }
+
+            // Cleanup remaining for max
+            for (; i <= group_size - 8; i += 8) {
+                __m256 v = _mm256_and_ps(_mm256_loadu_ps(x + group * group_size + i), abs_mask);
+                max_vec = _mm256_max_ps(max_vec, v);
+            }
+
+            // Reduce max_vec
+            __m128 h1 = _mm256_extractf128_ps(max_vec, 1);
+            __m128 h2 = _mm256_castps256_ps128(max_vec);
+            __m128 max128 = _mm_max_ps(h1, h2);
+            __m128 shuf = _mm_movehdup_ps(max128);
+            __m128 max_tmp = _mm_max_ps(max128, shuf);
+            shuf = _mm_movehl_ps(shuf, max_tmp);
+            max_tmp = _mm_max_ps(max_tmp, shuf);
+            wmax = _mm_cvtss_f32(max_tmp);
 #endif
             for (; i < group_size; i++) {
                 if (const float val = std::fabs(x[group * group_size + i]); val > wmax) wmax = val;
@@ -186,6 +222,28 @@ namespace Inference {
                 int8x16_t q_final = vcombine_s8(vqmovn_s16(q01), vqmovn_s16(q23));
                 vst1q_s8(qx->q + group * group_size + i, q_final);
             }
+#elif defined(__AVX2__)
+            __m256 inv_scale_vec = _mm256_set1_ps(inv_scale);
+            for (; i <= group_size - 16; i += 16) {
+                __m256 v0 = _mm256_loadu_ps(x + group * group_size + i);
+                __m256 v1 = _mm256_loadu_ps(x + group * group_size + i + 8);
+
+                v0 = _mm256_mul_ps(v0, inv_scale_vec);
+                v1 = _mm256_mul_ps(v1, inv_scale_vec);
+
+                __m256i i0 = _mm256_cvtps_epi32(v0);
+                __m256i i1 = _mm256_cvtps_epi32(v1);
+
+                __m256i p16 = _mm256_packs_epi32(i0, i1);
+                __m256i p16_ordered = _mm256_permute4x64_epi64(p16, 0xD8); // 0, 2, 1, 3
+
+                __m128i lo = _mm256_castsi256_si128(p16_ordered);
+                __m128i hi = _mm256_extracti128_si256(p16_ordered, 1);
+
+                __m128i p8 = _mm_packs_epi16(lo, hi);
+
+                _mm_storeu_si128(reinterpret_cast<__m128i *>(qx->q + group * group_size + i), p8);
+            }
 #endif
             for (; i < group_size; i++) {
                 const float quant_value = x[group * group_size + i] * inv_scale;
@@ -195,7 +253,8 @@ namespace Inference {
         }
     }
 
-    void QuantizedTransformer::rmsnorm(float *o, const float *x, const float *weight, const int size) {
+    void QuantizedTransformer::rmsnorm(float *__restrict__ o, const float *__restrict__ x,
+                                       const float *__restrict__ weight, const int size) {
         float ss = 0.0f;
 #if defined(__ARM_NEON)
         float32x4_t sum_vec = vdupq_n_f32(0.0f);
@@ -205,6 +264,23 @@ namespace Inference {
             sum_vec = vmlaq_f32(sum_vec, val, val);
         }
         ss = vaddvq_f32(sum_vec);
+        for (; j < size; j++) {
+            ss += x[j] * x[j];
+        }
+#elif defined(__AVX2__)
+        __m256 sum_vec = _mm256_setzero_ps();
+        int j = 0;
+        for (; j <= size - 8; j += 8) {
+            __m256 val = _mm256_loadu_ps(x + j);
+            sum_vec = _mm256_fmadd_ps(val, val, sum_vec);
+        }
+        __m128 sum_high = _mm256_extractf128_ps(sum_vec, 1);
+        __m128 sum_low = _mm256_castps256_ps128(sum_vec);
+        __m128 sum128 = _mm_add_ps(sum_low, sum_high);
+        sum128 = _mm_hadd_ps(sum128, sum128);
+        sum128 = _mm_hadd_ps(sum128, sum128);
+        ss = _mm_cvtss_f32(sum128);
+
         for (; j < size; j++) {
             ss += x[j] * x[j];
         }
@@ -225,6 +301,18 @@ namespace Inference {
             float32x4_t x_val = vld1q_f32(x + j);
             float32x4_t res = vmulq_f32(w_val, vmulq_f32(ss_vec, x_val));
             vst1q_f32(o + j, res);
+        }
+        for (; j < size; j++) {
+            o[j] = weight[j] * (ss * x[j]);
+        }
+#elif defined(__AVX2__)
+        j = 0;
+        __m256 ss_vec = _mm256_set1_ps(ss);
+        for (; j <= size - 8; j += 8) {
+            __m256 w_val = _mm256_loadu_ps(weight + j);
+            __m256 x_val = _mm256_loadu_ps(x + j);
+            __m256 res = _mm256_mul_ps(w_val, _mm256_mul_ps(ss_vec, x_val));
+            _mm256_storeu_ps(o + j, res);
         }
         for (; j < size; j++) {
             o[j] = weight[j] * (ss * x[j]);
@@ -340,6 +428,103 @@ namespace Inference {
                 val1 += static_cast<float>(ival1) * w->s[(in1 + j) / group_size] * sx;
                 val2 += static_cast<float>(ival2) * w->s[(in2 + j) / group_size] * sx;
                 val3 += static_cast<float>(ival3) * w->s[(in3 + j) / group_size] * sx;
+                                }
+#elif defined(__AVX2__)
+                for (int j = 0; j <= n - group_size; j += group_size) {
+                    // Accumulators for 4 outputs
+                    // We need to accumulate into 32-bit integers.
+                    // Since group_size is typically 64 or 32, we process chunks.
+
+                    __m256i sum0 = _mm256_setzero_si256();
+                    __m256i sum1 = _mm256_setzero_si256();
+                    __m256i sum2 = _mm256_setzero_si256();
+                    __m256i sum3 = _mm256_setzero_si256();
+
+                    int k = 0;
+                    for (; k <= group_size - 32; k += 32) {
+                        // Load 32 ints (int8) from x
+                        __m256i qx_raw = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(x->q + j + k));
+
+                        // Load 32 ints from w0..w3
+
+                        _mm_prefetch(reinterpret_cast<const char *>(w->q + in0 + j + k + 128), _MM_HINT_T0);
+
+                        _mm_prefetch(reinterpret_cast<const char *>(w->q + in1 + j + k + 128), _MM_HINT_T0);
+
+                        _mm_prefetch(reinterpret_cast<const char *>(w->q + in2 + j + k + 128), _MM_HINT_T0);
+
+                        _mm_prefetch(reinterpret_cast<const char *>(w->q + in3 + j + k + 128), _MM_HINT_T0);
+
+                        _mm_prefetch(reinterpret_cast<const char *>(x->q + j + k + 128), _MM_HINT_T0);
+
+
+                        __m256i qw0_raw = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(w->q + in0 + j + k));
+                        __m256i qw1_raw = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(w->q + in1 + j + k));
+                        __m256i qw2_raw = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(w->q + in2 + j + k));
+                        __m256i qw3_raw = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(w->q + in3 + j + k));
+
+                        // Split into low/high 128-bit lanes and sign extend to 16-bit
+                        // _mm256_cvtepi8_epi16 takes lower 128 bits (16 bytes) and extends to 256 bits (16 words)
+                        // So we need two ops for full 32 bytes.
+                        // Wait, _mm256_cvtepi8_epi16 consumes __m128i.
+
+                        __m128i qx_lo_128 = _mm256_castsi256_si128(qx_raw);
+                        __m128i qx_hi_128 = _mm256_extracti128_si256(qx_raw, 1);
+
+                        __m256i qx_lo = _mm256_cvtepi8_epi16(qx_lo_128);
+                        __m256i qx_hi = _mm256_cvtepi8_epi16(qx_hi_128);
+
+                        auto process_w = [&](__m256i w_raw, __m256i &acc) {
+                            __m128i w_lo_128 = _mm256_castsi256_si128(w_raw);
+                            __m128i w_hi_128 = _mm256_extracti128_si256(w_raw, 1);
+
+                            __m256i w_lo = _mm256_cvtepi8_epi16(w_lo_128);
+                            __m256i w_hi = _mm256_cvtepi8_epi16(w_hi_128);
+
+                            // madd_epi16: (a0*b0 + a1*b1), ... returns 8x32-bit integers
+                            __m256i prod_lo = _mm256_madd_epi16(qx_lo, w_lo);
+                            __m256i prod_hi = _mm256_madd_epi16(qx_hi, w_hi);
+
+                            // Accumulate
+                            acc = _mm256_add_epi32(acc, prod_lo);
+                            acc = _mm256_add_epi32(acc, prod_hi);
+                        };
+
+                        process_w(qw0_raw, sum0);
+                        process_w(qw1_raw, sum1);
+                        process_w(qw2_raw, sum2);
+                        process_w(qw3_raw, sum3);
+                    }
+
+                    // Reduce sum0..sum3 (which are vectors of 8 partial sums)
+                    auto hsum256_epi32 = [](__m256i v) -> int32_t {
+                        // Horizontal sum of 8x32bit ints
+                        __m128i lo = _mm256_castsi256_si128(v);
+                        __m128i hi = _mm256_extracti128_si256(v, 1);
+                        lo = _mm_add_epi32(lo, hi); // 4 ints
+                        lo = _mm_hadd_epi32(lo, lo); // 2 ints (duplicated)
+                        lo = _mm_hadd_epi32(lo, lo); // 1 int
+                        return _mm_cvtsi128_si32(lo);
+                    };
+
+                    int32_t ival0 = hsum256_epi32(sum0);
+                    int32_t ival1 = hsum256_epi32(sum1);
+                    int32_t ival2 = hsum256_epi32(sum2);
+                    int32_t ival3 = hsum256_epi32(sum3);
+
+                    for (; k < group_size; k++) {
+                        int8_t qx = x->q[j + k];
+                        ival0 += static_cast<int32_t>(qx) * static_cast<int32_t>(w->q[in0 + j + k]);
+                        ival1 += static_cast<int32_t>(qx) * static_cast<int32_t>(w->q[in1 + j + k]);
+                        ival2 += static_cast<int32_t>(qx) * static_cast<int32_t>(w->q[in2 + j + k]);
+                        ival3 += static_cast<int32_t>(qx) * static_cast<int32_t>(w->q[in3 + j + k]);
+                    }
+
+                    float sx = x->s[j / group_size];
+                    val0 += static_cast<float>(ival0) * w->s[(in0 + j) / group_size] * sx;
+                    val1 += static_cast<float>(ival1) * w->s[(in1 + j) / group_size] * sx;
+                    val2 += static_cast<float>(ival2) * w->s[(in2 + j) / group_size] * sx;
+                    val3 += static_cast<float>(ival3) * w->s[(in3 + j) / group_size] * sx;
                 }
 #else
                 for (int j = 0; j <= n - group_size; j += group_size) {
@@ -393,6 +578,38 @@ namespace Inference {
                         ival += static_cast<int32_t>(x->q[j + k_idx]) * static_cast<int32_t>(w->q[in + j + k_idx]);
                     }
                     val += static_cast<float>(ival) * w->s[(in + j) / group_size] * x->s[j / group_size];
+                                                                }
+#elif defined(__AVX2__)
+                    for (int j = 0; j <= n - group_size; j += group_size) {
+                        __m256i sum = _mm256_setzero_si256();
+                        int k = 0;
+                        for (; k <= group_size - 32; k += 32) {
+                            _mm_prefetch(reinterpret_cast<const char *>(w->q + in + j + k + 32), _MM_HINT_T0);
+                            _mm_prefetch(reinterpret_cast<const char *>(x->q + j + k + 32), _MM_HINT_T0);
+                            __m256i qx_raw = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(x->q + j + k));
+                            __m256i qw_raw = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(w->q + in + j + k));
+
+                            __m256i qx_lo = _mm256_cvtepi8_epi16(_mm256_castsi256_si128(qx_raw));
+                            __m256i qx_hi = _mm256_cvtepi8_epi16(_mm256_extracti128_si256(qx_raw, 1));
+
+                            __m256i qw_lo = _mm256_cvtepi8_epi16(_mm256_castsi256_si128(qw_raw));
+                            __m256i qw_hi = _mm256_cvtepi8_epi16(_mm256_extracti128_si256(qw_raw, 1));
+
+                            sum = _mm256_add_epi32(sum, _mm256_madd_epi16(qx_lo, qw_lo));
+                            sum = _mm256_add_epi32(sum, _mm256_madd_epi16(qx_hi, qw_hi));
+                        }
+
+                        __m128i lo = _mm256_castsi256_si128(sum);
+                        __m128i hi = _mm256_extracti128_si256(sum, 1);
+                        lo = _mm_add_epi32(lo, hi);
+                        lo = _mm_hadd_epi32(lo, lo);
+                        lo = _mm_hadd_epi32(lo, lo);
+                        int32_t ival = _mm_cvtsi128_si32(lo);
+
+                        for (; k < group_size; k++) {
+                            ival += static_cast<int32_t>(x->q[j + k]) * static_cast<int32_t>(w->q[in + j + k]);
+                        }
+                        val += static_cast<float>(ival) * w->s[(in + j) / group_size] * x->s[j / group_size];
                     }
 #else
                     for (int j = 0; j <= n - group_size; j += group_size) {
@@ -429,9 +646,16 @@ namespace Inference {
             QuantizedTensor xq_tensor{s->xq_q.data(), s->xq_s.data()};
             quantize(&xq_tensor, s->xb.data(), dim);
 
+            // Calculate pointers to the KV cache for this layer and position
+            const int loff = l * p->seq_len * kv_dim;
+            float *k_cache_ptr = s->key_cache.data() + loff + pos * kv_dim;
+            float *v_cache_ptr = s->value_cache.data() + loff + pos * kv_dim;
+
+            // Compute Q, K, V
+            // Write K and V directly to cache, avoiding intermediate s->k, s->v and copy
             matmul(s->q.data(), &xq_tensor, &w->wq[l], dim, dim);
-            matmul(s->k.data(), &xq_tensor, &w->wk[l], dim, kv_dim);
-            matmul(s->v.data(), &xq_tensor, &w->wv[l], dim, kv_dim);
+            matmul(k_cache_ptr, &xq_tensor, &w->wk[l], dim, kv_dim);
+            matmul(v_cache_ptr, &xq_tensor, &w->wv[l], dim, kv_dim);
 
             // RoPE
             const int rope_offset = pos * (head_size / 2);
@@ -456,12 +680,44 @@ namespace Inference {
                     vst1q_f32(s->q.data() + i * head_size + j, res);
 
                     if (i < p->n_kv_heads) {
-                        float32x4_t k_vec = vld1q_f32(s->k.data() + i * head_size + j);
+                        float32x4_t k_vec = vld1q_f32(k_cache_ptr + i * head_size + j);
                         float32x4_t k_term1 = vmulq_f32(k_vec, c_vec);
                         float32x4_t k_swap = vrev64q_f32(k_vec);
                         float32x4_t k_term2 = vmulq_f32(k_swap, s_signed);
                         float32x4_t k_res = vaddq_f32(k_term1, k_term2);
-                        vst1q_f32(s->k.data() + i * head_size + j, k_res);
+                        vst1q_f32(k_cache_ptr + i * head_size + j, k_res);
+                    }
+                }
+#elif defined(__AVX2__)
+                for (; j <= head_size - 8; j += 8) {
+                    __m256 q_vec = _mm256_loadu_ps(s->q.data() + i * head_size + j);
+
+                    __m128 c_small = _mm_loadu_ps(&rope_cos[rope_offset + j / 2]);
+                    __m128 s_small = _mm_loadu_ps(&rope_sin[rope_offset + j / 2]);
+
+                    __m128 c_lo = _mm_unpacklo_ps(c_small, c_small);
+                    __m128 c_hi = _mm_unpackhi_ps(c_small, c_small);
+                    __m256 c_vec = _mm256_insertf128_ps(_mm256_castps128_ps256(c_lo), c_hi, 1);
+
+                    __m128 s_lo = _mm_unpacklo_ps(s_small, s_small);
+                    __m128 s_hi = _mm_unpackhi_ps(s_small, s_small);
+                    __m256 s_vec = _mm256_insertf128_ps(_mm256_castps128_ps256(s_lo), s_hi, 1);
+
+                    __m256 q_swap = _mm256_permute_ps(q_vec, _MM_SHUFFLE(2, 3, 0, 1));
+
+                    __m256 term1 = _mm256_mul_ps(q_vec, c_vec);
+                    __m256 term2 = _mm256_mul_ps(q_swap, s_vec);
+                    __m256 res = _mm256_addsub_ps(term1, term2);
+
+                    _mm256_storeu_ps(s->q.data() + i * head_size + j, res);
+
+                    if (i < p->n_kv_heads) {
+                        __m256 k_vec = _mm256_loadu_ps(k_cache_ptr + i * head_size + j);
+                        __m256 k_swap = _mm256_permute_ps(k_vec, _MM_SHUFFLE(2, 3, 0, 1));
+                        __m256 k_t1 = _mm256_mul_ps(k_vec, c_vec);
+                        __m256 k_t2 = _mm256_mul_ps(k_swap, s_vec);
+                        __m256 k_res = _mm256_addsub_ps(k_t1, k_t2);
+                        _mm256_storeu_ps(k_cache_ptr + i * head_size + j, k_res);
                     }
                 }
 #endif
@@ -475,26 +731,101 @@ namespace Inference {
                     s->q[i * head_size + j + 1] = q0 * fci + q1 * fcr;
 
                     if (i < p->n_kv_heads) {
-                        const float k0 = s->k[i * head_size + j];
-                        const float k1 = s->k[i * head_size + j + 1];
-                        s->k[i * head_size + j] = k0 * fcr - k1 * fci;
-                        s->k[i * head_size + j + 1] = k0 * fci + k1 * fcr;
+                        const float k0 = k_cache_ptr[i * head_size + j];
+                        const float k1 = k_cache_ptr[i * head_size + j + 1];
+                        k_cache_ptr[i * head_size + j] = k0 * fcr - k1 * fci;
+                        k_cache_ptr[i * head_size + j + 1] = k0 * fci + k1 * fcr;
                     }
                 }
             }
-
-            const int loff = l * p->seq_len * kv_dim;
-            float *key_cache_row = s->key_cache.data() + loff + pos * kv_dim;
-            float *value_cache_row = s->value_cache.data() + loff + pos * kv_dim;
-            std::copy_n(s->k.data(), kv_dim, key_cache_row);
-            std::copy_n(s->v.data(), kv_dim, value_cache_row);
 
             int h;
 #pragma omp parallel for private(h)
             for (h = 0; h < p->n_heads; h++) {
                 const float *q = s->q.data() + h * head_size;
                 float *att = s->att.data() + h * p->seq_len;
-                for (int t = 0; t <= pos; t++) {
+                int t = 0;
+
+                for (; t <= pos - 4; t += 4) {
+                    const float *k0 = s->key_cache.data() + loff + t * kv_dim + (h / kv_mul) * head_size;
+                    const float *k1 = s->key_cache.data() + loff + (t + 1) * kv_dim + (h / kv_mul) * head_size;
+                    const float *k2 = s->key_cache.data() + loff + (t + 2) * kv_dim + (h / kv_mul) * head_size;
+                    const float *k3 = s->key_cache.data() + loff + (t + 3) * kv_dim + (h / kv_mul) * head_size;
+
+                    float s0 = 0.0f;
+                    float s1 = 0.0f;
+                    float s2 = 0.0f;
+                    float s3 = 0.0f;
+                    int i = 0;
+
+#if defined(__AVX2__)
+                    __m256 sum0 = _mm256_setzero_ps();
+                    __m256 sum1 = _mm256_setzero_ps();
+                    __m256 sum2 = _mm256_setzero_ps();
+                    __m256 sum3 = _mm256_setzero_ps();
+
+                    for (; i <= head_size - 8; i += 8) {
+                        __m256 q_vec = _mm256_loadu_ps(q + i);
+                        __m256 k0_vec = _mm256_loadu_ps(k0 + i);
+                        __m256 k1_vec = _mm256_loadu_ps(k1 + i);
+                        __m256 k2_vec = _mm256_loadu_ps(k2 + i);
+                        __m256 k3_vec = _mm256_loadu_ps(k3 + i);
+
+                        sum0 = _mm256_fmadd_ps(q_vec, k0_vec, sum0);
+                        sum1 = _mm256_fmadd_ps(q_vec, k1_vec, sum1);
+                        sum2 = _mm256_fmadd_ps(q_vec, k2_vec, sum2);
+                        sum3 = _mm256_fmadd_ps(q_vec, k3_vec, sum3);
+                    }
+
+                    auto hsum = [](__m256 v) {
+                        __m128 lo = _mm256_castps256_ps128(v);
+                        __m128 hi = _mm256_extractf128_ps(v, 1);
+                        lo = _mm_add_ps(lo, hi);
+                        lo = _mm_hadd_ps(lo, lo);
+                        return _mm_cvtss_f32(_mm_hadd_ps(lo, lo));
+                    };
+                    s0 = hsum(sum0);
+                    s1 = hsum(sum1);
+                    s2 = hsum(sum2);
+                    s3 = hsum(sum3);
+#elif defined(__ARM_NEON)
+                    float32x4_t sum0_v = vdupq_n_f32(0.0f);
+                    float32x4_t sum1_v = vdupq_n_f32(0.0f);
+                    float32x4_t sum2_v = vdupq_n_f32(0.0f);
+                    float32x4_t sum3_v = vdupq_n_f32(0.0f);
+
+                    for (; i <= head_size - 4; i += 4) {
+                        float32x4_t q_vec = vld1q_f32(q + i);
+                        float32x4_t k0_vec = vld1q_f32(k0 + i);
+                        float32x4_t k1_vec = vld1q_f32(k1 + i);
+                        float32x4_t k2_vec = vld1q_f32(k2 + i);
+                        float32x4_t k3_vec = vld1q_f32(k3 + i);
+
+                        sum0_v = vmlaq_f32(sum0_v, q_vec, k0_vec);
+                        sum1_v = vmlaq_f32(sum1_v, q_vec, k1_vec);
+                        sum2_v = vmlaq_f32(sum2_v, q_vec, k2_vec);
+                        sum3_v = vmlaq_f32(sum3_v, q_vec, k3_vec);
+                    }
+                    s0 = vaddvq_f32(sum0_v);
+                    s1 = vaddvq_f32(sum1_v);
+                    s2 = vaddvq_f32(sum2_v);
+                    s3 = vaddvq_f32(sum3_v);
+#endif
+                    for (; i < head_size; i++) {
+                        float qv = q[i];
+                        s0 += qv * k0[i];
+                        s1 += qv * k1[i];
+                        s2 += qv * k2[i];
+                        s3 += qv * k3[i];
+                    }
+                    float scale = 1.0f / std::sqrt(static_cast<float>(head_size));
+                    att[t] = s0 * scale;
+                    att[t + 1] = s1 * scale;
+                    att[t + 2] = s2 * scale;
+                    att[t + 3] = s3 * scale;
+                }
+
+                for (; t <= pos; t++) {
                     const float *k = s->key_cache.data() + loff + t * kv_dim + (h / kv_mul) * head_size;
 
                     float score = 0.0f;
@@ -507,6 +838,19 @@ namespace Inference {
                         sum_vec = vmlaq_f32(sum_vec, q_vec, k_vec);
                     }
                     score = vaddvq_f32(sum_vec);
+#elif defined(__AVX2__)
+                    __m256 sum_vec = _mm256_setzero_ps();
+                    for (; i <= head_size - 8; i += 8) {
+                        __m256 q_vec = _mm256_loadu_ps(q + i);
+                        __m256 k_vec = _mm256_loadu_ps(k + i);
+                        sum_vec = _mm256_fmadd_ps(q_vec, k_vec, sum_vec);
+                    }
+                    __m128 sum_high = _mm256_extractf128_ps(sum_vec, 1);
+                    __m128 sum_low = _mm256_castps256_ps128(sum_vec);
+                    __m128 sum128 = _mm_add_ps(sum_low, sum_high);
+                    sum128 = _mm_hadd_ps(sum128, sum128);
+                    sum128 = _mm_hadd_ps(sum128, sum128);
+                    score = _mm_cvtss_f32(sum128);
 #endif
                     for (; i < head_size; i++) {
                         score += q[i] * k[i];
@@ -532,6 +876,14 @@ namespace Inference {
                         xb_vec = vmlaq_f32(xb_vec, a_vec, v_vec);
                         vst1q_f32(xb + i, xb_vec);
                     }
+#elif defined(__AVX2__)
+                    __m256 a_vec = _mm256_set1_ps(a);
+                    for (; i <= head_size - 8; i += 8) {
+                        __m256 xb_vec = _mm256_loadu_ps(xb + i);
+                        __m256 v_vec = _mm256_loadu_ps(v + i);
+                        xb_vec = _mm256_fmadd_ps(a_vec, v_vec, xb_vec);
+                        _mm256_storeu_ps(xb + i, xb_vec);
+                    }
 #endif
                     for (; i < head_size; i++) {
                         xb[i] += a * v[i];
@@ -552,6 +904,7 @@ namespace Inference {
             matmul(s->hb.data(), &xq_tensor, &w->w1[l], dim, hidden_dim);
             matmul(s->hb2.data(), &xq_tensor, &w->w3[l], dim, hidden_dim);
 
+#pragma omp parallel for
             for (int i = 0; i < hidden_dim; i++) {
                 float val = s->hb[i];
                 val *= (1.0f / (1.0f + std::exp(-val)));

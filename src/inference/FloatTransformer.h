@@ -28,7 +28,8 @@ namespace Inference {
         std::vector<float> hb;
         std::vector<float> hb2;
         std::vector<float> q;
-        // k and v are written directly to cache, no intermediate buffer needed
+        std::vector<float> k; // added for layout transform
+        std::vector<float> v; // added for layout transform
         std::vector<float> att;
         std::vector<float> logits;
         std::vector<float> key_cache;

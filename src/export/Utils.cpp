@@ -2,12 +2,25 @@
 
 namespace Export {
     void serialize_fp32(std::ofstream &out, const torch::Tensor &tensor) {
-        // Equivalent to: d = tensor.detach().cpu().view(-1).to(torch.float32).numpy()
-        const torch::Tensor d = tensor.detach().cpu().view({-1}).to(torch::kFloat32);
+        // Ensure CPU and contiguous
+        torch::Tensor t = tensor;
+        if (t.device().type() != torch::kCPU) {
+            t = t.cpu();
+        }
 
-        // In C++, we access the raw data pointer directly rather than using struct.pack
-        const auto data_ptr = d.data_ptr < float > ();
-        const auto num_bytes = d.numel() * sizeof(float);
+        // Ensure float32
+        if (t.dtype() != torch::kFloat32) {
+            t = t.to(torch::kFloat32);
+        }
+
+        // Ensure flat and contiguous
+        if (!t.is_contiguous()) {
+            t = t.contiguous();
+        }
+
+        // Access raw data pointer
+        const auto data_ptr = t.data_ptr < float > ();
+        const auto num_bytes = t.numel() * sizeof(float);
 
         out.write(reinterpret_cast<const char *>(data_ptr), num_bytes);
     }

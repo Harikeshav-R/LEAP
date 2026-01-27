@@ -36,6 +36,9 @@ namespace Inference {
             // MADV_WILLNEED: Notify OS that we will need these pages soon (triggers readahead)
             madvise(ptr, size, MADV_SEQUENTIAL);
             madvise(ptr, size, MADV_WILLNEED);
+#ifdef MADV_HUGEPAGE
+            madvise(ptr, size, MADV_HUGEPAGE);
+#endif
 #endif
         }
 

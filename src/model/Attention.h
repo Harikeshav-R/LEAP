@@ -2,26 +2,26 @@
 #define LEAP_ATTENTION_H
 
 #include "ModelArgs.h"
-
-
 #include <torch/torch.h>
 #include <optional>
-#include <vector>
-
 
 namespace Model {
-    // --- Attention Module ---
+    struct KVCache {
+        torch::Tensor k; // [B, n_kv_heads, max_seq_len, head_dim]
+        torch::Tensor v; // [B, n_kv_heads, max_seq_len, head_dim]
+    };
+
     class AttentionImpl : public torch::nn::Module {
     public:
         explicit AttentionImpl(const ModelArgs &args);
 
         torch::Tensor forward(
             const torch::Tensor &x,
-            const torch::Tensor &freqs_cos,
-            const torch::Tensor &freqs_sin
+            const torch::Tensor &freqs_cis,
+            int64_t start_pos,
+            const std::optional<KVCache> &kv_cache
         );
 
-        // Submodules
         torch::nn::Linear wq{nullptr};
         torch::nn::Linear wk{nullptr};
         torch::nn::Linear wv{nullptr};
@@ -30,22 +30,14 @@ namespace Model {
         torch::nn::Dropout resid_dropout{nullptr};
 
     private:
-        int n_heads;
-        int n_kv_heads;
-        int n_local_heads;
-        int n_local_kv_heads;
-        int n_rep;
-        int head_dim;
-        float dropout_prob;
-
-        // Buffer
-        torch::Tensor mask;
+        int64_t n_heads;
+        int64_t n_kv_heads;
+        int64_t n_rep;
+        int64_t head_dim;
+        double dropout_prob;
     };
 
-    // Use TORCH_MODULE to create a value-semantic wrapper (Attention)
-    // that points to the implementation (AttentionImpl).
     TORCH_MODULE (Attention);
 } // namespace Model
-
 
 #endif //LEAP_ATTENTION_H

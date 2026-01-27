@@ -7,18 +7,18 @@
 
 namespace Inference {
     struct FloatTransformerWeights {
-        float *token_embedding_table;
-        float *rms_att_weight;
-        float *rms_ffn_weight;
-        float *wq;
-        float *wk;
-        float *wv;
-        float *wo;
-        float *w1;
-        float *w2;
-        float *w3;
-        float *rms_final_weight;
-        float *wcls;
+        const float *token_embedding_table;
+        const float *rms_att_weight;
+        const float *rms_ffn_weight;
+        const float *wq;
+        const float *wk;
+        const float *wv;
+        const float *wo;
+        const float *w1;
+        const float *w2;
+        const float *w3;
+        const float *rms_final_weight;
+        const float *wcls;
     };
 
     struct FloatRunState {
@@ -28,8 +28,7 @@ namespace Inference {
         std::vector<float> hb;
         std::vector<float> hb2;
         std::vector<float> q;
-        std::vector<float> k;
-        std::vector<float> v;
+        // k and v are written directly to cache, no intermediate buffer needed
         std::vector<float> att;
         std::vector<float> logits;
         std::vector<float> key_cache;
@@ -52,9 +51,15 @@ namespace Inference {
         void *mmap_ptr;
         size_t file_size;
 
+        // RoPE lookup tables
+        std::vector<float> rope_cos;
+        std::vector<float> rope_sin;
+
         void memory_map_weights(float *ptr, int shared_weights);
 
         void init_run_state();
+
+        void precompute_freqs();
 
         static void rmsnorm(float *o, const float *x, const float *weight, int size);
 

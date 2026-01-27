@@ -4,6 +4,8 @@
 #include <fstream>
 #include <algorithm>
 #include <vector>
+#include <queue>
+#include <tuple>
 
 namespace Inference {
     Tokenizer::Tokenizer(const std::string &tokenizer_path, const int vocab_size) : vocab_size(vocab_size) {
@@ -28,6 +30,7 @@ namespace Inference {
 
         vocab.resize(vocab_size);
         vocab_scores.resize(vocab_size);
+        vocab_lookup.reserve(vocab_size);
 
         for (int i = 0; i < vocab_size; i++) {
             float score;
@@ -46,6 +49,7 @@ namespace Inference {
                 throw std::runtime_error("failed read vocab string");
             }
             vocab[i] = std::move(str);
+            vocab_lookup[vocab[i]] = i;
         }
     }
 
@@ -63,17 +67,10 @@ namespace Inference {
         return piece;
     }
 
-    int Tokenizer::str_lookup(const std::string &str, const std::vector<TokenIndex> &sorted_vocab) {
-        // Use binary search (std::lower_bound)
-        TokenIndex target{};
-        target.str = &str;
-        const auto it = std::ranges::lower_bound(sorted_vocab, target,
-                                                 [](const TokenIndex &a, const TokenIndex &b) {
-                                                     return *a.str < *b.str;
-                                                 });
-
-        if (it != sorted_vocab.end() && *it->str == str) {
-            return it->id;
+    int Tokenizer::str_lookup(std::string_view str) {
+        const auto it = vocab_lookup.find(str);
+        if (it != vocab_lookup.end()) {
+            return it->second;
         }
         return -1;
     }
@@ -85,28 +82,16 @@ namespace Inference {
             return;
         }
 
-        if (sorted_vocab.empty()) {
-            sorted_vocab.resize(vocab_size);
-            for (int i = 0; i < vocab_size; i++) {
-                sorted_vocab[i].str = &vocab[i];
-                sorted_vocab[i].id = i;
-            }
-            std::ranges::sort(sorted_vocab, [](const TokenIndex &a, const TokenIndex &b) {
-                return *a.str < *b.str;
-            });
-        }
-
         std::string str_buffer;
         str_buffer.reserve(max_token_length * 2 + 10);
 
         n_tokens = 0;
         tokens.clear();
-        tokens.resize(text.size() + 3);
+        tokens.reserve(text.size() + 3);
 
         if (bos)
-            tokens[n_tokens++] = 128000;
+            tokens.push_back(128000);
 
-        str_buffer.clear();
         for (size_t k = 0; k < text.length(); k++) {
             const char c = text[k];
             if ((c & 0xC0) != 0x80) {
@@ -120,60 +105,144 @@ namespace Inference {
                 }
             }
 
-            if (const int id = str_lookup(str_buffer, sorted_vocab); id != -1) {
-                tokens[n_tokens++] = id;
+            if (const int id = str_lookup(str_buffer); id != -1) {
+                tokens.push_back(id);
             } else {
                 for (const char b: str_buffer) {
-                    tokens[n_tokens++] = static_cast<unsigned char>(b) + 3;
+                    tokens.push_back(static_cast<unsigned char>(b) + 3);
                 }
             }
             str_buffer.clear();
         }
 
-        // BPE merge
-        while (true) {
-            float best_score = -1e10;
-            int best_id = -1;
-            int best_idx = -1;
-            int best_len = 2;
+        n_tokens = tokens.size();
 
-            for (int i = 0; i < (n_tokens - 1); i++) {
-                std::string merged = vocab[tokens[i]] + vocab[tokens[i + 1]];
+        // Linked list structure for O(1) removals
+        struct Node {
+            int id;
+            int prev;
+            int next;
+        };
+        std::vector<Node> list(n_tokens);
+        for (int i = 0; i < n_tokens; ++i) {
+            list[i].id = tokens[i];
+            list[i].prev = i - 1;
+            list[i].next = i + 1;
+        }
+        list.back().next = -1; // End marker
 
-                if (const int id = str_lookup(merged, sorted_vocab); id != -1 && vocab_scores[id] > best_score) {
-                    best_score = vocab_scores[id];
-                    best_id = id;
-                    best_idx = i;
-                }
+        // Buffer for merging strings to avoid allocations
+        std::vector<char> merge_buffer;
+        merge_buffer.reserve(max_token_length * 2 + 1);
+
+        // Priority Queue for O(N log N) merge
+        // Tuple: <score, left_idx, right_idx, left_token_id, right_token_id>
+        // We store token IDs to validate that the pair is still valid when popped
+        using PqElement = std::tuple<float, int, int, int, int>;
+
+        auto comp = [](const PqElement &a, const PqElement &b) {
+            // Priority 1: Higher score
+            if (std::abs(std::get < 0 > (a) - std::get < 0 > (b)) > 1e-6) {
+                return std::get < 0 > (a) < std::get < 0 > (b);
             }
+            // Priority 2: Smaller index (leftmost first)
+            return std::get < 1 > (a) > std::get < 1 > (b);
+        };
 
-            if (best_idx == -1) {
-                for (int i = 0; i < (n_tokens - 2); i++) {
-                    std::string merged = vocab[tokens[i]] + vocab[tokens[i + 1]] + vocab[tokens[i + 2]];
+        std::priority_queue<PqElement, std::vector<PqElement>, decltype(comp)> queue(comp);
 
-                    if (const int id = str_lookup(merged, sorted_vocab); id != -1 && vocab_scores[id] > best_score) {
-                        best_score = vocab_scores[id];
-                        best_id = id;
-                        best_idx = i;
-                        best_len = 3;
-                    }
-                }
+        // Initial scan to fill PQ
+        for (int i = 0; i != -1 && list[i].next != -1; i = list[i].next) {
+            const int next_i = list[i].next;
+            const std::string &s1 = vocab[list[i].id];
+            const std::string &s2 = vocab[list[next_i].id];
+
+            merge_buffer.clear();
+            merge_buffer.insert(merge_buffer.end(), s1.begin(), s1.end());
+            merge_buffer.insert(merge_buffer.end(), s2.begin(), s2.end());
+            std::string_view merged_view(merge_buffer.data(), merge_buffer.size());
+
+            if (const int id = str_lookup(merged_view); id != -1) {
+                queue.emplace(vocab_scores[id], i, next_i, list[i].id, list[next_i].id);
             }
-
-            if (best_idx == -1) {
-                break;
-            }
-
-            tokens[best_idx] = best_id;
-            for (int i = best_idx + 1; i < (n_tokens - best_len + 1); i++) {
-                tokens[i] = tokens[i + best_len - 1];
-            }
-            n_tokens -= (best_len - 1);
         }
 
-        if (eos)
-            tokens[n_tokens++] = 128001;
+        // BPE merge loop
+        while (!queue.empty()) {
+            const auto [score, left_idx, right_idx, left_id, right_id] = queue.top();
+            queue.pop();
 
-        tokens.resize(n_tokens);
+            // Validate if the pair is still current
+            // 1. Check if nodes are still adjacent
+            if (list[left_idx].next != right_idx) continue;
+            // 2. Check if token IDs match (nodes haven't been modified)
+            if (list[left_idx].id != left_id || list[right_idx].id != right_id) continue;
+
+            // Perform Merge
+            const std::string &s1 = vocab[left_id];
+            const std::string &s2 = vocab[right_id];
+
+            merge_buffer.clear();
+            merge_buffer.insert(merge_buffer.end(), s1.begin(), s1.end());
+            merge_buffer.insert(merge_buffer.end(), s2.begin(), s2.end());
+            std::string_view merged_view(merge_buffer.data(), merge_buffer.size());
+
+            const int merged_id = str_lookup(merged_view);
+            if (merged_id == -1) continue; // Should not happen given initial scan, but safety first
+
+            // Update list
+            list[left_idx].id = merged_id;
+
+            // Remove right_idx
+            int next_next_i = list[right_idx].next;
+            list[left_idx].next = next_next_i;
+            if (next_next_i != -1) {
+                list[next_next_i].prev = left_idx;
+            }
+
+            // Add new potential pairs to PQ
+
+            // 1. New pair with left neighbor
+            if (int prev_i = list[left_idx].prev; prev_i != -1) {
+                const std::string &ps1 = vocab[list[prev_i].id];
+                const std::string &ps2 = vocab[merged_id];
+
+                merge_buffer.clear();
+                merge_buffer.insert(merge_buffer.end(), ps1.begin(), ps1.end());
+                merge_buffer.insert(merge_buffer.end(), ps2.begin(), ps2.end());
+                std::string_view p_view(merge_buffer.data(), merge_buffer.size());
+
+                if (const int pid = str_lookup(p_view); pid != -1) {
+                    queue.emplace(vocab_scores[pid], prev_i, left_idx, list[prev_i].id, merged_id);
+                }
+            }
+
+            // 2. New pair with right neighbor
+            if (next_next_i != -1) {
+                const std::string &ns1 = vocab[merged_id];
+                const std::string &ns2 = vocab[list[next_next_i].id];
+
+                merge_buffer.clear();
+                merge_buffer.insert(merge_buffer.end(), ns1.begin(), ns1.end());
+                merge_buffer.insert(merge_buffer.end(), ns2.begin(), ns2.end());
+                std::string_view n_view(merge_buffer.data(), merge_buffer.size());
+
+                if (const int nid = str_lookup(n_view); nid != -1) {
+                    queue.emplace(vocab_scores[nid], left_idx, next_next_i, merged_id, list[next_next_i].id);
+                }
+            }
+        }
+
+        // Reconstruct tokens vector
+        tokens.clear();
+        for (int i = 0; i != -1; i = list[i].next) {
+            tokens.push_back(list[i].id);
+        }
+        n_tokens = tokens.size();
+
+        if (eos) {
+            tokens.push_back(128001);
+            n_tokens++;
+        }
     }
 } // namespace Inference

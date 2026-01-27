@@ -2,7 +2,8 @@
 #include "Utils.h"
 #include <cmath>
 #include <algorithm>
-
+#include <vector>
+#include <iterator>
 
 namespace Inference {
     Sampler::Sampler(const int vocab_size, const float temperature, const float topp, const unsigned long long rng_seed)
@@ -11,15 +12,8 @@ namespace Inference {
     }
 
     int Sampler::sample_argmax(const float *probabilities, const int n) {
-        int max_i = 0;
-        float max_p = probabilities[0];
-        for (int i = 1; i < n; i++) {
-            if (probabilities[i] > max_p) {
-                max_i = i;
-                max_p = probabilities[i];
-            }
-        }
-        return max_i;
+        const auto it = std::max_element(probabilities, probabilities + n);
+        return static_cast<int>(std::distance(probabilities, it));
     }
 
     int Sampler::sample_mult(const float *probabilities, const int n, const float coin) {
@@ -38,6 +32,8 @@ namespace Inference {
                              const float coin) {
         int n0 = 0;
         const float cutoff = (1.0f - topp) / (static_cast<float>(n) - 1.0f);
+
+        // This loop selects candidates. Can use std::copy_if but manual is fine for speed/simplicity here
         for (int i = 0; i < n; i++) {
             if (probabilities[i] >= cutoff) {
                 probindex[n0].index = i;
@@ -71,21 +67,16 @@ namespace Inference {
         return probindex[last_idx].index;
     }
 
-    // Helper softmax function
     static void softmax(float *x, const int size) {
-        float max_val = x[0];
-        for (int i = 1; i < size; i++) {
-            if (x[i] > max_val) {
-                max_val = x[i];
-            }
-        }
+        const float max_val = *std::max_element(x, x + size);
         float sum = 0.0f;
         for (int i = 0; i < size; i++) {
             x[i] = std::exp(x[i] - max_val);
             sum += x[i];
         }
+        const float inv_sum = 1.0f / sum;
         for (int i = 0; i < size; i++) {
-            x[i] /= sum;
+            x[i] *= inv_sum;
         }
     }
 

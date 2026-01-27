@@ -128,129 +128,86 @@ namespace Inference {
     }
 
     void QuantizedTransformer::dequantize(const QuantizedTensor *qx, float *x, const int n) const {
+#if defined(__ARM_NEON)
+        int i = 0;
+        for (; i <= n - 16; i += 16) {
+            // Load 16 int8 weights
+            int8x16_t q_raw = vld1q_s8(qx->q + i);
+
+            // Expand to 16-bit
+            int16x8_t q_low = vmovl_s8(vget_low_s8(q_raw));
+            int16x8_t q_high = vmovl_s8(vget_high_s8(q_raw));
+
+            // Expand to 32-bit float
+            float32x4_t f0 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(q_low)));
+            float32x4_t f1 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(q_low)));
+            float32x4_t f2 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(q_high)));
+            float32x4_t f3 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(q_high)));
+
+            // Load scales. Group size is typically >= 32, so 16 elements share the same scale?
+            // Wait, group_size can be 32, 64, 128.
+            // If i is aligned to group_size, we load scale once.
+            // But strict alignment isn't guaranteed inside the loop structure relative to group_size boundaries 
+            // without more complex logic. 
+            // However, dequantize is usually called on full blocks.
+            // Let's assume standard group sizes and handle the general case by loading scale broadcast.
+
+            // Optimization: If group_size >> 16, we can hoist scale loading.
+            // For safety, we load scale for each block.
+
+            float s_val0 = qx->s[i / group_size];
+            float s_val1 = qx->s[(i + 15) / group_size]; // Check if we cross group boundary
+
+            if (s_val0 == s_val1) {
+                float32x4_t s_vec = vdupq_n_f32(s_val0);
+                vst1q_f32(x + i, vmulq_f32(f0, s_vec));
+                vst1q_f32(x + i + 4, vmulq_f32(f1, s_vec));
+                vst1q_f32(x + i + 8, vmulq_f32(f2, s_vec));
+                vst1q_f32(x + i + 12, vmulq_f32(f3, s_vec));
+            } else {
+                // Slow path crossing boundary (rare)
+                for (int k = 0; k < 16; k++) x[i + k] = qx->q[i + k] * qx->s[(i + k) / group_size];
+            }
+        }
+        for (; i < n; i++) {
+            x[i] = qx->q[i] * qx->s[i / group_size];
+        }
+#elif defined(__AVX2__)
+        int i = 0;
+        for (; i <= n - 16; i += 16) {
+            // Load 16 int8
+            __m128i q_raw = _mm_loadu_si128(reinterpret_cast<const __m128i *>(qx->q + i));
+
+            // Extend to 16-bit
+            __m256i q_16 = _mm256_cvtepi8_epi16(q_raw);
+
+            // Extend to 32-bit (low and high)
+            __m256i q_32_lo = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(q_16));
+            __m256i q_32_hi = _mm256_cvtepi16_epi32(_mm256_extracti128_si256(q_16, 1));
+
+            // Convert to float
+            __m256 f_lo = _mm256_cvtepi32_ps(q_32_lo);
+            __m256 f_hi = _mm256_cvtepi32_ps(q_32_hi);
+
+            float s0 = qx->s[i / group_size];
+            float s1 = qx->s[(i + 15) / group_size];
+
+            if (s0 == s1) {
+                __m256 s_vec = _mm256_set1_ps(s0);
+                _mm256_storeu_ps(x + i, _mm256_mul_ps(f_lo, s_vec));
+                _mm256_storeu_ps(x + i + 8, _mm256_mul_ps(f_hi, s_vec));
+            } else {
+                for (int k = 0; k < 16; k++) x[i + k] = qx->q[i + k] * qx->s[(i + k) / group_size];
+            }
+        }
+        for (; i < n; i++) {
+            x[i] = qx->q[i] * qx->s[i / group_size];
+        }
+#else
         for (int i = 0; i < n; i++) {
             x[i] = qx->q[i] * qx->s[i / group_size];
         }
-    }
-
-    void QuantizedTransformer::quantize(const QuantizedTensor *qx, const float *x, const int n) const {
-        const int num_groups = n / group_size;
-
-#pragma omp parallel for
-        for (int group = 0; group < num_groups; group++) {
-            constexpr float Q_MAX = 127.0f;
-            float wmax = 0.0f;
-
-            int i = 0;
-#if defined(__ARM_NEON)
-            float32x4_t max_vec = vdupq_n_f32(0.0f);
-            for (; i <= group_size - 16; i += 16) {
-                float32x4_t v0 = vabsq_f32(vld1q_f32(x + group * group_size + i));
-                float32x4_t v1 = vabsq_f32(vld1q_f32(x + group * group_size + i + 4));
-                float32x4_t v2 = vabsq_f32(vld1q_f32(x + group * group_size + i + 8));
-                float32x4_t v3 = vabsq_f32(vld1q_f32(x + group * group_size + i + 12));
-
-                max_vec = vmaxnmq_f32(max_vec, v0);
-                max_vec = vmaxnmq_f32(max_vec, v1);
-                max_vec = vmaxnmq_f32(max_vec, v2);
-                max_vec = vmaxnmq_f32(max_vec, v3);
-            }
-            // Reduction for max
-            wmax = vmaxnmvq_f32(max_vec);
-#elif defined(__AVX2__)
-            __m256 max_vec = _mm256_setzero_ps();
-            const __m256 abs_mask = _mm256_castsi256_ps(_mm256_set1_epi32(0x7FFFFFFF));
-
-            for (; i <= group_size - 32; i += 32) {
-                __m256 v0 = _mm256_and_ps(_mm256_loadu_ps(x + group * group_size + i), abs_mask);
-                __m256 v1 = _mm256_and_ps(_mm256_loadu_ps(x + group * group_size + i + 8), abs_mask);
-                __m256 v2 = _mm256_and_ps(_mm256_loadu_ps(x + group * group_size + i + 16), abs_mask);
-                __m256 v3 = _mm256_and_ps(_mm256_loadu_ps(x + group * group_size + i + 24), abs_mask);
-
-                max_vec = _mm256_max_ps(max_vec, v0);
-                max_vec = _mm256_max_ps(max_vec, v1);
-                max_vec = _mm256_max_ps(max_vec, v2);
-                max_vec = _mm256_max_ps(max_vec, v3);
-            }
-
-            // Cleanup remaining for max
-            for (; i <= group_size - 8; i += 8) {
-                __m256 v = _mm256_and_ps(_mm256_loadu_ps(x + group * group_size + i), abs_mask);
-                max_vec = _mm256_max_ps(max_vec, v);
-            }
-
-            // Reduce max_vec
-            __m128 h1 = _mm256_extractf128_ps(max_vec, 1);
-            __m128 h2 = _mm256_castps256_ps128(max_vec);
-            __m128 max128 = _mm_max_ps(h1, h2);
-            __m128 shuf = _mm_movehdup_ps(max128);
-            __m128 max_tmp = _mm_max_ps(max128, shuf);
-            shuf = _mm_movehl_ps(shuf, max_tmp);
-            max_tmp = _mm_max_ps(max_tmp, shuf);
-            wmax = _mm_cvtss_f32(max_tmp);
 #endif
-            for (; i < group_size; i++) {
-                if (const float val = std::fabs(x[group * group_size + i]); val > wmax) wmax = val;
-            }
-
-            const float scale = wmax / Q_MAX;
-            qx->s[group] = scale;
-            const float inv_scale = (scale != 0.0f) ? 1.0f / scale : 0.0f;
-
-            i = 0;
-#if defined(__ARM_NEON)
-            float32x4_t inv_scale_vec = vdupq_n_f32(inv_scale);
-            for (; i <= group_size - 16; i += 16) {
-                float32x4_t v0 = vld1q_f32(x + group * group_size + i);
-                float32x4_t v1 = vld1q_f32(x + group * group_size + i + 4);
-                float32x4_t v2 = vld1q_f32(x + group * group_size + i + 8);
-                float32x4_t v3 = vld1q_f32(x + group * group_size + i + 12);
-
-                v0 = vmulq_f32(v0, inv_scale_vec);
-                v1 = vmulq_f32(v1, inv_scale_vec);
-                v2 = vmulq_f32(v2, inv_scale_vec);
-                v3 = vmulq_f32(v3, inv_scale_vec);
-
-                int32x4_t i0 = vcvtaq_s32_f32(v0);
-                int32x4_t i1 = vcvtaq_s32_f32(v1);
-                int32x4_t i2 = vcvtaq_s32_f32(v2);
-                int32x4_t i3 = vcvtaq_s32_f32(v3);
-
-                int16x8_t q01 = vcombine_s16(vqmovn_s32(i0), vqmovn_s32(i1));
-                int16x8_t q23 = vcombine_s16(vqmovn_s32(i2), vqmovn_s32(i3));
-
-                int8x16_t q_final = vcombine_s8(vqmovn_s16(q01), vqmovn_s16(q23));
-                vst1q_s8(qx->q + group * group_size + i, q_final);
-            }
-#elif defined(__AVX2__)
-            __m256 inv_scale_vec = _mm256_set1_ps(inv_scale);
-            for (; i <= group_size - 16; i += 16) {
-                __m256 v0 = _mm256_loadu_ps(x + group * group_size + i);
-                __m256 v1 = _mm256_loadu_ps(x + group * group_size + i + 8);
-
-                v0 = _mm256_mul_ps(v0, inv_scale_vec);
-                v1 = _mm256_mul_ps(v1, inv_scale_vec);
-
-                __m256i i0 = _mm256_cvtps_epi32(v0);
-                __m256i i1 = _mm256_cvtps_epi32(v1);
-
-                __m256i p16 = _mm256_packs_epi32(i0, i1);
-                __m256i p16_ordered = _mm256_permute4x64_epi64(p16, 0xD8); // 0, 2, 1, 3
-
-                __m128i lo = _mm256_castsi256_si128(p16_ordered);
-                __m128i hi = _mm256_extracti128_si256(p16_ordered, 1);
-
-                __m128i p8 = _mm_packs_epi16(lo, hi);
-
-                _mm_storeu_si128(reinterpret_cast<__m128i *>(qx->q + group * group_size + i), p8);
-            }
-#endif
-            for (; i < group_size; i++) {
-                const float quant_value = x[group * group_size + i] * inv_scale;
-                const auto quantized = static_cast<int8_t>(std::round(quant_value));
-                qx->q[group * group_size + i] = quantized;
-            }
-        }
     }
 
     void QuantizedTransformer::rmsnorm(float *__restrict__ o, const float *__restrict__ x,
@@ -274,6 +231,7 @@ namespace Inference {
             __m256 val = _mm256_loadu_ps(x + j);
             sum_vec = _mm256_fmadd_ps(val, val, sum_vec);
         }
+        // Horizontal sum
         __m128 sum_high = _mm256_extractf128_ps(sum_vec, 1);
         __m128 sum_low = _mm256_castps256_ps128(sum_vec);
         __m128 sum128 = _mm_add_ps(sum_low, sum_high);
@@ -291,7 +249,31 @@ namespace Inference {
 #endif
         ss /= static_cast<float>(size);
         ss += 1e-5f;
+
+        // Fast Inverse Square Root with Newton-Raphson refinement
+#if defined(__ARM_NEON)
+        float32x4_t ss_v = vdupq_n_f32(ss);
+        float32x4_t rsqrt_est = vrsqrteq_f32(ss_v);
+        // Step: y = y * (3 - x * y * y) / 2
+        // vrsqrtsq_f32(x, y) returns (3 - x * y) / 2 ... wait, no. 
+        // ARM v8 manual: vrsqrts computes (3 - a * b) / 2.
+        // So step is: est * vrsqrts(ss, est*est)
+        float32x4_t rsqrt_step = vrsqrtsq_f32(ss_v, vmulq_f32(rsqrt_est, rsqrt_est));
+        rsqrt_est = vmulq_f32(rsqrt_est, rsqrt_step);
+        ss = vgetq_lane_f32(rsqrt_est, 0);
+#elif defined(__AVX2__)
+        __m128 ss_v = _mm_set_ss(ss);
+        __m128 rsqrt_est = _mm_rsqrt_ss(ss_v);
+        // Newton-Raphson: y_n+1 = 0.5 * y_n * (3 - x * y_n^2)
+        __m128 three = _mm_set_ss(3.0f);
+        __m128 half = _mm_set_ss(0.5f);
+        __m128 est_sq = _mm_mul_ss(rsqrt_est, rsqrt_est);
+        __m128 term = _mm_sub_ss(three, _mm_mul_ss(ss_v, est_sq));
+        rsqrt_est = _mm_mul_ss(_mm_mul_ss(half, rsqrt_est), term);
+        ss = _mm_cvtss_f32(rsqrt_est);
+#else
         ss = 1.0f / std::sqrt(ss);
+#endif
 
 #if defined(__ARM_NEON)
         j = 0;
@@ -337,6 +319,28 @@ namespace Inference {
         }
     }
 
+    void QuantizedTransformer::quantize(const QuantizedTensor *qx, const float *x, const int n) const {
+        const int gs = group_size;
+        for (int i = 0; i < n; i += gs) {
+            float max_val = 0.0f;
+            const int current_gs = std::min(gs, n - i);
+
+            for (int j = 0; j < current_gs; j++) {
+                const float val = std::abs(x[i + j]);
+                if (val > max_val) max_val = val;
+            }
+
+            const float scale = max_val / 127.0f;
+            const float id = scale != 0.0f ? 1.0f / scale : 0.0f;
+
+            qx->s[i / gs] = scale;
+
+            for (int j = 0; j < current_gs; j++) {
+                qx->q[i + j] = static_cast<int8_t>(std::round(x[i + j] * id));
+            }
+        }
+    }
+
     void QuantizedTransformer::matmul(float *__restrict__ xout, const QuantizedTensor *__restrict__ x,
                                       const QuantizedTensor *__restrict__ w, const int n,
                                       const int d) const {
@@ -368,6 +372,12 @@ namespace Inference {
                     int32x4_t sum3 = vdupq_n_s32(0);
 
                     for (; k <= group_size - 16; k += 16) {
+                        __builtin_prefetch(x->q + j + k + 128, 0, 0);
+                        __builtin_prefetch(w->q + in0 + j + k + 128, 0, 0);
+                        __builtin_prefetch(w->q + in1 + j + k + 128, 0, 0);
+                        __builtin_prefetch(w->q + in2 + j + k + 128, 0, 0);
+                        __builtin_prefetch(w->q + in3 + j + k + 128, 0, 0);
+
                         const int8x16_t qx_vec = vld1q_s8(x->q + j + k);
 
                         const int8x16_t qw0 = vld1q_s8(w->q + in0 + j + k);
@@ -904,7 +914,7 @@ namespace Inference {
             matmul(s->hb.data(), &xq_tensor, &w->w1[l], dim, hidden_dim);
             matmul(s->hb2.data(), &xq_tensor, &w->w3[l], dim, hidden_dim);
 
-#pragma omp parallel for
+#pragma omp parallel for simd
             for (int i = 0; i < hidden_dim; i++) {
                 float val = s->hb[i];
                 val *= (1.0f / (1.0f + std::exp(-val)));

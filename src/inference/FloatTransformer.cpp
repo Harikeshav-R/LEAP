@@ -139,8 +139,24 @@ namespace Inference {
 
         ss += 1e-5f;
 
+#if defined(__ARM_NEON)
+        float32x4_t ss_v = vdupq_n_f32(ss);
+        float32x4_t rsqrt_est = vrsqrteq_f32(ss_v);
+        float32x4_t rsqrt_step = vrsqrtsq_f32(ss_v, vmulq_f32(rsqrt_est, rsqrt_est));
+        rsqrt_est = vmulq_f32(rsqrt_est, rsqrt_step);
+        ss = vgetq_lane_f32(rsqrt_est, 0);
+#elif defined(__AVX2__)
+        __m128 ss_v = _mm_set_ss(ss);
+        __m128 rsqrt_est = _mm_rsqrt_ss(ss_v);
+        __m128 three = _mm_set_ss(3.0f);
+        __m128 half = _mm_set_ss(0.5f);
+        __m128 est_sq = _mm_mul_ss(rsqrt_est, rsqrt_est);
+        __m128 term = _mm_sub_ss(three, _mm_mul_ss(ss_v, est_sq));
+        rsqrt_est = _mm_mul_ss(_mm_mul_ss(half, rsqrt_est), term);
+        ss = _mm_cvtss_f32(rsqrt_est);
+#else
         ss = 1.0f / std::sqrt(ss);
-
+#endif
 
 #if defined(__ARM_NEON)
 
@@ -209,62 +225,68 @@ namespace Inference {
         // W (d,n) @ x (n,) -> xout (d,)
         int i;
 #pragma omp parallel for private(i) schedule(static)
-        for (i = 0; i < d; i += 4) {
-            if (i + 3 < d) {
+        for (i = 0; i < d; i += 8) {
+            if (i + 7 < d) {
                 float val0 = 0.0f;
                 float val1 = 0.0f;
                 float val2 = 0.0f;
                 float val3 = 0.0f;
+                float val4 = 0.0f;
+                float val5 = 0.0f;
+                float val6 = 0.0f;
+                float val7 = 0.0f;
+
                 int j = 0;
                 const int offset0 = i * n;
                 const int offset1 = (i + 1) * n;
                 const int offset2 = (i + 2) * n;
                 const int offset3 = (i + 3) * n;
+                const int offset4 = (i + 4) * n;
+                const int offset5 = (i + 5) * n;
+                const int offset6 = (i + 6) * n;
+                const int offset7 = (i + 7) * n;
 
 #if defined(__ARM_NEON)
-                float32x4_t sum0 = vdupq_n_f32(0.0f);
-                float32x4_t sum1 = vdupq_n_f32(0.0f);
-                float32x4_t sum2 = vdupq_n_f32(0.0f);
-                float32x4_t sum3 = vdupq_n_f32(0.0f);
+                float32x4_t sum0 = vdupq_n_f32(0.0f); float32x4_t sum1 = vdupq_n_f32(0.0f);
+                float32x4_t sum2 = vdupq_n_f32(0.0f); float32x4_t sum3 = vdupq_n_f32(0.0f);
+                float32x4_t sum4 = vdupq_n_f32(0.0f); float32x4_t sum5 = vdupq_n_f32(0.0f);
+                float32x4_t sum6 = vdupq_n_f32(0.0f); float32x4_t sum7 = vdupq_n_f32(0.0f);
 
                 for (; j <= n - 4; j += 4) {
                     float32x4_t x_vec = vld1q_f32(x + j);
 
-                    float32x4_t w0 = vld1q_f32(w + offset0 + j);
-                    float32x4_t w1 = vld1q_f32(w + offset1 + j);
-                    float32x4_t w2 = vld1q_f32(w + offset2 + j);
-                    float32x4_t w3 = vld1q_f32(w + offset3 + j);
-
-                    sum0 = vmlaq_f32(sum0, w0, x_vec);
-                    sum1 = vmlaq_f32(sum1, w1, x_vec);
-                    sum2 = vmlaq_f32(sum2, w2, x_vec);
-                    sum3 = vmlaq_f32(sum3, w3, x_vec);
+                    sum0 = vmlaq_f32(sum0, vld1q_f32(w + offset0 + j), x_vec);
+                    sum1 = vmlaq_f32(sum1, vld1q_f32(w + offset1 + j), x_vec);
+                    sum2 = vmlaq_f32(sum2, vld1q_f32(w + offset2 + j), x_vec);
+                    sum3 = vmlaq_f32(sum3, vld1q_f32(w + offset3 + j), x_vec);
+                    sum4 = vmlaq_f32(sum4, vld1q_f32(w + offset4 + j), x_vec);
+                    sum5 = vmlaq_f32(sum5, vld1q_f32(w + offset5 + j), x_vec);
+                    sum6 = vmlaq_f32(sum6, vld1q_f32(w + offset6 + j), x_vec);
+                    sum7 = vmlaq_f32(sum7, vld1q_f32(w + offset7 + j), x_vec);
                 }
-                val0 = vaddvq_f32(sum0);
-                val1 = vaddvq_f32(sum1);
-                val2 = vaddvq_f32(sum2);
-                val3 = vaddvq_f32(sum3);
+                val0 = vaddvq_f32(sum0); val1 = vaddvq_f32(sum1);
+                val2 = vaddvq_f32(sum2); val3 = vaddvq_f32(sum3);
+                val4 = vaddvq_f32(sum4); val5 = vaddvq_f32(sum5);
+                val6 = vaddvq_f32(sum6); val7 = vaddvq_f32(sum7);
 #elif defined(__AVX2__)
-                __m256 sum0 = _mm256_setzero_ps();
-                __m256 sum1 = _mm256_setzero_ps();
-                __m256 sum2 = _mm256_setzero_ps();
-                __m256 sum3 = _mm256_setzero_ps();
+                __m256 sum0 = _mm256_setzero_ps(); __m256 sum1 = _mm256_setzero_ps();
+                __m256 sum2 = _mm256_setzero_ps(); __m256 sum3 = _mm256_setzero_ps();
+                __m256 sum4 = _mm256_setzero_ps(); __m256 sum5 = _mm256_setzero_ps();
+                __m256 sum6 = _mm256_setzero_ps(); __m256 sum7 = _mm256_setzero_ps();
 
                 for (; j <= n - 8; j += 8) {
                     __m256 x_vec = _mm256_loadu_ps(x + j);
 
-                    __m256 w0 = _mm256_loadu_ps(w + offset0 + j);
-                    __m256 w1 = _mm256_loadu_ps(w + offset1 + j);
-                    __m256 w2 = _mm256_loadu_ps(w + offset2 + j);
-                    __m256 w3 = _mm256_loadu_ps(w + offset3 + j);
-
-                    sum0 = _mm256_fmadd_ps(w0, x_vec, sum0);
-                    sum1 = _mm256_fmadd_ps(w1, x_vec, sum1);
-                    sum2 = _mm256_fmadd_ps(w2, x_vec, sum2);
-                    sum3 = _mm256_fmadd_ps(w3, x_vec, sum3);
+                    sum0 = _mm256_fmadd_ps(_mm256_loadu_ps(w + offset0 + j), x_vec, sum0);
+                    sum1 = _mm256_fmadd_ps(_mm256_loadu_ps(w + offset1 + j), x_vec, sum1);
+                    sum2 = _mm256_fmadd_ps(_mm256_loadu_ps(w + offset2 + j), x_vec, sum2);
+                    sum3 = _mm256_fmadd_ps(_mm256_loadu_ps(w + offset3 + j), x_vec, sum3);
+                    sum4 = _mm256_fmadd_ps(_mm256_loadu_ps(w + offset4 + j), x_vec, sum4);
+                    sum5 = _mm256_fmadd_ps(_mm256_loadu_ps(w + offset5 + j), x_vec, sum5);
+                    sum6 = _mm256_fmadd_ps(_mm256_loadu_ps(w + offset6 + j), x_vec, sum6);
+                    sum7 = _mm256_fmadd_ps(_mm256_loadu_ps(w + offset7 + j), x_vec, sum7);
                 }
 
-                // Horizontal reduction helper
                 auto hsum256_ps = [](__m256 v) -> float {
                     __m128 v_low = _mm256_castps256_ps128(v);
                     __m128 v_high = _mm256_extractf128_ps(v, 1);
@@ -274,10 +296,10 @@ namespace Inference {
                     return _mm_cvtss_f32(v_low);
                 };
 
-                val0 = hsum256_ps(sum0);
-                val1 = hsum256_ps(sum1);
-                val2 = hsum256_ps(sum2);
-                val3 = hsum256_ps(sum3);
+                val0 = hsum256_ps(sum0); val1 = hsum256_ps(sum1);
+                val2 = hsum256_ps(sum2); val3 = hsum256_ps(sum3);
+                val4 = hsum256_ps(sum4); val5 = hsum256_ps(sum5);
+                val6 = hsum256_ps(sum6); val7 = hsum256_ps(sum7);
 #endif
                 for (; j < n; j++) {
                     float xv = x[j];
@@ -285,11 +307,19 @@ namespace Inference {
                     val1 += w[offset1 + j] * xv;
                     val2 += w[offset2 + j] * xv;
                     val3 += w[offset3 + j] * xv;
+                    val4 += w[offset4 + j] * xv;
+                    val5 += w[offset5 + j] * xv;
+                    val6 += w[offset6 + j] * xv;
+                    val7 += w[offset7 + j] * xv;
                 }
                 xout[i] = val0;
                 xout[i + 1] = val1;
                 xout[i + 2] = val2;
                 xout[i + 3] = val3;
+                xout[i + 4] = val4;
+                xout[i + 5] = val5;
+                xout[i + 6] = val6;
+                xout[i + 7] = val7;
             } else {
                 for (int k = i; k < d; k++) {
                     float val = 0.0f;
@@ -298,8 +328,6 @@ namespace Inference {
 #if defined(__ARM_NEON)
                     float32x4_t sum_vec = vdupq_n_f32(0.0f);
                     for (; j <= n - 4; j += 4) {
-                        __builtin_prefetch(w + offset + j + 32, 0, 0);
-                        __builtin_prefetch(x + j + 32, 0, 0);
                         float32x4_t w_vec = vld1q_f32(w + offset + j);
                         float32x4_t x_vec = vld1q_f32(x + j);
                         sum_vec = vmlaq_f32(sum_vec, w_vec, x_vec);
@@ -308,13 +336,10 @@ namespace Inference {
 #elif defined(__AVX2__)
                     __m256 sum_vec = _mm256_setzero_ps();
                     for (; j <= n - 8; j += 8) {
-                        _mm_prefetch(reinterpret_cast<const char *>(w + offset + j + 32), _MM_HINT_T0);
-                        _mm_prefetch(reinterpret_cast<const char *>(x + j + 32), _MM_HINT_T0);
                         __m256 w_vec = _mm256_loadu_ps(w + offset + j);
                         __m256 x_vec = _mm256_loadu_ps(x + j);
                         sum_vec = _mm256_fmadd_ps(w_vec, x_vec, sum_vec);
                     }
-                    // Horizontal sum
                     __m128 sum_high = _mm256_extractf128_ps(sum_vec, 1);
                     __m128 sum_low = _mm256_castps256_ps128(sum_vec);
                     __m128 sum128 = _mm_add_ps(sum_low, sum_high);
@@ -706,7 +731,7 @@ namespace Inference {
             matmul(s->hb.data(), s->xb.data(), w->w1 + l * dim * hidden_dim, dim, hidden_dim);
             matmul(s->hb2.data(), s->xb.data(), w->w3 + l * dim * hidden_dim, dim, hidden_dim);
 
-#pragma omp parallel for
+#pragma omp parallel for simd
             for (int i = 0; i < hidden_dim; i++) {
                 float val = s->hb[i];
                 val *= (1.0f / (1.0f + std::exp(-val))); // Silu

@@ -16,10 +16,6 @@ namespace fs = std::filesystem;
 using json = nlohmann::json;
 
 namespace Export {
-    // =========================================================================
-    // Helpers: Safetensors Loading
-    // =========================================================================
-
     // Helper to map safetensors data types to torch::ScalarType
     static torch::ScalarType get_dtype(const safetensors::dtype type) {
         switch (type) {
@@ -35,15 +31,11 @@ namespace Export {
     }
 
     // Loads a single .safetensors file into a map of Tensors.
-    // NOTE: This implementation reads the file into memory to ensure data persists
-    // after the function returns (via .clone()).
-    // Loads a single .safetensors file into a map of Tensors.
-    // Loads a single .safetensors file into a map of Tensors.
+    // Uses mmap internally via safetensors library.
     std::map<std::string, torch::Tensor> load_file(const std::string &path) {
         std::string warn, err;
         safetensors::safetensors_t st;
 
-        // Load the parsed safetensors structure
         if (!safetensors::load_from_file(path, &st, &warn, &err)) {
             throw std::runtime_error("Failed to load safetensors file " + path + ": " + err);
         }
@@ -51,67 +43,45 @@ namespace Export {
         std::map<std::string, torch::Tensor> state_dict;
         uint8_t *base_ptr = st.storage.data();
 
-        // FIX: Iterate using the keys() method provided by the ordered_dict
-        // and look up the tensor info for each key.
-
         for (const std::vector<std::string> &keys = st.tensors.keys(); const auto &name: keys) {
-            // Retrieve the tensor info for this key
-            // Note: We access the underlying map/lookup via the ordered_dict's mechanism
-            // If direct access isn't exposed, we iterate the 'list' member (if available),
-            // but since you see keys(), there is likely an 'at()' or '[]' operator.
-            // However, the safest access in this specific library structure (minijson::ordered_dict)
-            // is often just iterating the internal vector if 'keys()' is separate.
-
-            // To be 100% safe with this specific library variation without guessing the 'at' syntax:
-            // We will iterate the underlying list which correlates to these keys.
-            // But if you strictly want to use the keys found by clang:
-
             safetensors::tensor_t tensor_info;
-            st.tensors.at(name, &tensor_info); // Assuming standard map-like access
+            st.tensors.at(name, &tensor_info);
 
-            // Convert shapes
             std::vector<int64_t> sizes;
+            sizes.reserve(tensor_info.shape.size());
             for (const auto d: tensor_info.shape) {
                 sizes.push_back(static_cast<int64_t>(d));
             }
 
             auto options = torch::TensorOptions().dtype(get_dtype(tensor_info.dtype));
             const size_t offset = tensor_info.data_offsets[0];
-            auto *data_ptr = static_cast<void *>(base_ptr + offset);
+            void *data_ptr = static_cast<void *>(base_ptr + offset);
 
-            const torch::Tensor t = torch::from_blob(data_ptr, sizes, options).clone();
-            state_dict[name] = t;
+            // Create tensor from blob.
+            // .clone() is ESSENTIAL here because safetensors_t destructor might unmap memory.
+            // Ideally, we'd keep the file mapped, but for export simplicity we copy.
+            auto t = torch::from_blob(data_ptr, sizes, options);
+            state_dict[name] = t.clone();
         }
-
-        // Iterate directly over the ordered_dict
-        // The iterator provides a pair/struct with 'first' (key) and 'second' (value)
 
         return state_dict;
     }
 
-    // =========================================================================
-    // Helpers: Weight Manipulation
-    // =========================================================================
-
     // Reverse permutation for RoPE weights (WQ, WK)
-    // Python: w.view(n_heads, 2, dim1 // n_heads // 2, dim2).transpose(1, 2).reshape(dim1, dim2)
+    // Optimized to reduce intermediate views
     torch::Tensor permute_reverse(const torch::Tensor &w, const int64_t n_heads, int64_t dim1, int64_t dim2) {
-        const auto view_shape = std::vector<int64_t>{n_heads, 2, dim1 / n_heads / 2, dim2};
-        return w.view(view_shape)
+        // Python: w.view(n_heads, 2, dim1 // n_heads // 2, dim2).transpose(1, 2).reshape(dim1, dim2)
+        // We can do this with efficient reshaping
+        return w.view({n_heads, 2, dim1 / n_heads / 2, dim2})
                 .transpose(1, 2)
                 .reshape({dim1, dim2})
                 .contiguous();
     }
 
-    // =========================================================================
-    // Main Loader Logic
-    // =========================================================================
-
     Model::Transformer load_meta_model(const std::string &model_path) {
         fs::path base_path(model_path);
-
-        // 1. Load params.json
         fs::path params_path = base_path / "params.json";
+
         std::ifstream f(params_path);
         if (!f.is_open()) {
             throw std::runtime_error("Could not open params.json at " + params_path.string());
@@ -120,7 +90,6 @@ namespace Export {
         f >> params;
         std::cout << "Loaded params: " << params.dump() << std::endl;
 
-        // 2. Find .safetensors files
         std::vector<fs::path> model_paths;
         for (const auto &entry: fs::directory_iterator(base_path)) {
             if (entry.path().extension() == ".safetensors") {
@@ -132,65 +101,61 @@ namespace Export {
         }
         std::ranges::sort(model_paths);
 
-        // 3. Load all shards
         std::cout << "Loading " << model_paths.size() << " safetensor files..." << std::endl;
-        std::vector<std::map<std::string, torch::Tensor> > shards(model_paths.size());
 
+        // Parallel load of shards
+        std::vector<std::map<std::string, torch::Tensor> > shards(model_paths.size());
 #pragma omp parallel for
         for (size_t i = 0; i < model_paths.size(); ++i) {
             shards[i] = load_file(model_paths[i].string());
         }
 
-        // 4. Concat Weights
-        // We accumulate the final state_dict here
         std::map<std::string, torch::Tensor> state_dict;
-
-        // Iterate over keys from the first shard
-        // Note: We copy the keys list to avoid iterator invalidation issues if we were modifying shards in place
+        // Collect keys from first shard
         std::vector<std::string> keys;
         for (const auto &key: shards[0] | std::views::keys) {
             keys.push_back(key);
         }
 
         std::cout << "Concatenating weights..." << std::endl;
+
+        // This loop can be slow if map insertions are frequent.
+        // However, since we process key-by-key, we can't easily parallelize the outer loop 
+        // without locking the state_dict.
+        // Parallelizing tensor concatenation is handled by Torch internally.
         for (const auto &name: keys) {
             std::vector<torch::Tensor> tensors;
             tensors.reserve(shards.size());
 
-            // Collect this tensor from all shards
             for (auto &shard: shards) {
-                if (shard.contains(name)) {
-                    tensors.push_back(shard[name]);
-                    shard.erase(name); // <--- CRITICAL: Drop ref count to free memory
+                if (auto it = shard.find(name); it != shard.end()) {
+                    tensors.push_back(std::move(it->second));
+                    shard.erase(it); // release memory ASAP
                 }
             }
 
             if (tensors.empty()) continue;
 
-            // Determine concatenation axis
             if (tensors.size() == 1 || tensors[0].ndimension() == 1) {
-                state_dict[name] = tensors[0];
+                state_dict[name] = std::move(tensors[0]);
             } else {
                 bool is_axis_1 = (
-                    name.rfind("tok_embeddings.", 0) == 0 || // startswith
+                    name.rfind("tok_embeddings.", 0) == 0 ||
                     (name.size() >= 20 && name.compare(name.size() - 20, 20, ".attention.wo.weight") == 0) ||
-                    // endswith
                     (name.size() >= 23 && name.compare(name.size() - 23, 23, ".feed_forward.w2.weight") == 0)
-                    // endswith
                 );
 
                 int64_t axis = is_axis_1 ? 1 : 0;
                 state_dict[name] = torch::cat(tensors, axis);
             }
         }
+        shards.clear(); // Free empty maps
 
-        // Clear shards to free memory
-        shards.clear();
-
-        // 5. Handle Hugging Face keys -> Meta format conversion
+        // Handle HF -> Meta keys
         bool has_tok = state_dict.contains("tok_embeddings.weight");
+        bool has_embed = state_dict.contains("model.embed_tokens.weight");
 
-        if (bool has_embed = state_dict.contains("model.embed_tokens.weight"); !has_tok && has_embed) {
+        if (!has_tok && has_embed) {
             std::cout << "Transforming Hugging Face keys to Meta format..." << std::endl;
             std::map<std::string, torch::Tensor> new_state_dict;
 
@@ -198,37 +163,52 @@ namespace Export {
             int64_t n_kv_heads = params.contains("n_kv_heads") ? params["n_kv_heads"].get<int64_t>() : n_heads;
             int64_t dim = params["dim"].get<int64_t>();
 
-            // Direct Mappings
-            new_state_dict["tok_embeddings.weight"] = state_dict["model.embed_tokens.weight"];
-            new_state_dict["norm.weight"] = state_dict["model.norm.weight"];
+            // Direct moves where possible
+            auto move_key = [&](const std::string &src, const std::string &dst) {
+                if (state_dict.contains(src)) {
+                    new_state_dict[dst] = std::move(state_dict[src]);
+                }
+            };
+
+            move_key("model.embed_tokens.weight", "tok_embeddings.weight");
+            move_key("model.norm.weight", "norm.weight");
 
             if (state_dict.contains("lm_head.weight")) {
-                new_state_dict["output.weight"] = state_dict["lm_head.weight"];
+                move_key("lm_head.weight", "output.weight");
             } else {
-                std::cout << "lm_head.weight not found, assuming tied weights..." << std::endl;
-                new_state_dict["output.weight"] = state_dict["model.embed_tokens.weight"];
+                // Weight tying: assuming clone is needed if it's shared? 
+                // Actually in export we just need the data.
+                new_state_dict["output.weight"] = new_state_dict["tok_embeddings.weight"];
             }
 
             // Layer Mappings
-            for (const auto &[key, value]: state_dict) {
+            // We iterate over the old map. Since we are moving out of it, we should be careful.
+            // But here we construct new keys from old keys.
+            // It's safer to iterate keys copy or just iterate safely.
+            // Since we move `value`, the original `state_dict` becomes invalid/empty values.
+
+            // To be safe and optimal: iterate a copy of keys or use the fact that we're building a new map.
+            // The logic involves string parsing which is fast enough.
+
+            // Collect keys first to avoid iterator invalidation or weirdness (though moving value is fine)
+            // But we can just iterate.
+
+            // Note: Parallelizing this loop requires locking new_state_dict, probably not worth it for metadata ops.
+            for (auto &[key, value]: state_dict) {
+                if (value.defined() == false) continue; // Already moved
                 if (key.find("model.layers.") == std::string::npos) continue;
 
-                // Split key: model.layers.{i}.{suffix}
+                // Parsing logic ...
                 std::vector<std::string> parts;
                 std::stringstream ss(key);
                 std::string segment;
                 while (std::getline(ss, segment, '.')) parts.push_back(segment);
 
-                // Expect at least model, layers, i, ...
                 if (parts.size() < 4) continue;
 
-                // Extract layer index
                 int layer_i = -1;
-                try {
-                    layer_i = std::stoi(parts[2]);
-                } catch (...) { continue; }
+                try { layer_i = std::stoi(parts[2]); } catch (...) { continue; }
 
-                // Reconstruct suffix
                 std::string suffix = "";
                 for (size_t k = 3; k < parts.size(); ++k) {
                     suffix += parts[k];
@@ -238,31 +218,29 @@ namespace Export {
                 std::string prefix = "layers." + std::to_string(layer_i) + ".";
 
                 if (suffix == "input_layernorm.weight") {
-                    new_state_dict[prefix + "attention_norm.weight"] = value;
+                    new_state_dict[prefix + "attention_norm.weight"] = std::move(value);
                 } else if (suffix == "post_attention_layernorm.weight") {
-                    new_state_dict[prefix + "ffn_norm.weight"] = value;
+                    new_state_dict[prefix + "ffn_norm.weight"] = std::move(value);
                 } else if (suffix == "self_attn.q_proj.weight") {
                     new_state_dict[prefix + "attention.wq.weight"] = permute_reverse(value, n_heads, dim, dim);
                 } else if (suffix == "self_attn.k_proj.weight") {
                     int64_t kv_dim = (dim * n_kv_heads) / n_heads;
                     new_state_dict[prefix + "attention.wk.weight"] = permute_reverse(value, n_kv_heads, kv_dim, dim);
                 } else if (suffix == "self_attn.v_proj.weight") {
-                    new_state_dict[prefix + "attention.wv.weight"] = value;
+                    new_state_dict[prefix + "attention.wv.weight"] = std::move(value);
                 } else if (suffix == "self_attn.o_proj.weight") {
-                    new_state_dict[prefix + "attention.wo.weight"] = value;
+                    new_state_dict[prefix + "attention.wo.weight"] = std::move(value);
                 } else if (suffix == "mlp.gate_proj.weight") {
-                    new_state_dict[prefix + "feed_forward.w1.weight"] = value;
+                    new_state_dict[prefix + "feed_forward.w1.weight"] = std::move(value);
                 } else if (suffix == "mlp.down_proj.weight") {
-                    new_state_dict[prefix + "feed_forward.w2.weight"] = value;
+                    new_state_dict[prefix + "feed_forward.w2.weight"] = std::move(value);
                 } else if (suffix == "mlp.up_proj.weight") {
-                    new_state_dict[prefix + "feed_forward.w3.weight"] = value;
+                    new_state_dict[prefix + "feed_forward.w3.weight"] = std::move(value);
                 }
             }
-            // Swap to new dictionary
-            state_dict = new_state_dict;
+            state_dict = std::move(new_state_dict);
         }
 
-        // 6. Setup ModelArgs
         Model::ModelArgs config;
         config.dim = params["dim"].get<int64_t>();
         config.n_layers = params["n_layers"].get<int64_t>();
@@ -276,11 +254,8 @@ namespace Export {
         std::cout << "Initializing Transformer model..." << std::endl;
         Model::Transformer model(config);
 
-        // 7. Load Weights into Model (In-place copy)
-        // We use torch::NoGradGuard to prevent tracking this as an operation
         torch::NoGradGuard no_grad;
 
-        // Helper to safely load a parameter
         auto load_param = [&](const torch::Tensor &param, const std::string &key) {
             if (state_dict.contains(key)) {
                 param.set_data(state_dict[key]);
@@ -293,8 +268,11 @@ namespace Export {
         load_param(model->norm->weight, "norm.weight");
         load_param(model->output->weight, "output.weight");
 
+        // Use parallel loading for layers?
+        // set_data is fast (pointer assignment), but maybe iteration overhead.
+        // Sequential is fine for safety.
         for (int i = 0; i < model->layers.size(); ++i) {
-            auto &layer = model->layers[i]; // Access the underlying TransformerBlock value
+            auto &layer = model->layers[i];
             std::string prefix = "layers." + std::to_string(i) + ".";
 
             load_param(layer->attention_norm->weight, prefix + "attention_norm.weight");
@@ -310,6 +288,21 @@ namespace Export {
         }
 
         model->eval();
+
+        // Automatic Device Selection
+        torch::Device device(torch::kCPU);
+        if (torch::cuda::is_available()) {
+            std::cout << "CUDA detected. Moving model to GPU..." << std::endl;
+            device = torch::Device(torch::kCUDA);
+        } else if (torch::mps::is_available()) {
+            std::cout << "MPS detected. Moving model to Apple Silicon GPU..." << std::endl;
+            device = torch::Device(torch::kMPS);
+        }
+
+        if (device.type() != torch::kCPU) {
+            model->to(device);
+        }
+
         std::cout << "Model loaded successfully." << std::endl;
         return model;
     }

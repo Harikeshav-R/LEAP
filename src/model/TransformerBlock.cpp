@@ -6,7 +6,6 @@ namespace Model {
           n_heads(args.n_heads),
           dim(args.dim),
           head_dim(args.dim / args.n_heads) {
-        
         attention = register_module("attention", Attention(args));
 
         int64_t hidden_dim_val = args.hidden_dim.value_or(-1);

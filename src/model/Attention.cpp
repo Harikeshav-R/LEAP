@@ -9,10 +9,14 @@ namespace Model {
         head_dim = args.dim / n_heads;
         dropout_prob = args.dropout;
 
-        wq = register_module("wq", torch::nn::Linear(torch::nn::LinearOptions(args.dim, n_heads * head_dim).bias(false)));
-        wk = register_module("wk", torch::nn::Linear(torch::nn::LinearOptions(args.dim, n_kv_heads * head_dim).bias(false)));
-        wv = register_module("wv", torch::nn::Linear(torch::nn::LinearOptions(args.dim, n_kv_heads * head_dim).bias(false)));
-        wo = register_module("wo", torch::nn::Linear(torch::nn::LinearOptions(n_heads * head_dim, args.dim).bias(false)));
+        wq = register_module(
+            "wq", torch::nn::Linear(torch::nn::LinearOptions(args.dim, n_heads * head_dim).bias(false)));
+        wk = register_module(
+            "wk", torch::nn::Linear(torch::nn::LinearOptions(args.dim, n_kv_heads * head_dim).bias(false)));
+        wv = register_module(
+            "wv", torch::nn::Linear(torch::nn::LinearOptions(args.dim, n_kv_heads * head_dim).bias(false)));
+        wo = register_module(
+            "wo", torch::nn::Linear(torch::nn::LinearOptions(n_heads * head_dim, args.dim).bias(false)));
 
         attn_dropout = register_module("attn_dropout", torch::nn::Dropout(args.dropout));
         resid_dropout = register_module("resid_dropout", torch::nn::Dropout(args.dropout));
@@ -35,7 +39,7 @@ namespace Model {
 
         // KV Cache Management
         torch::Tensor keys, values;
-        
+
         if (kv_cache.has_value()) {
             // Transpose to [B, n_kv, S, D] for storage
             auto xk_t = xk.transpose(1, 2);
@@ -60,14 +64,14 @@ namespace Model {
         // We reshape Q to [B, n_kv_heads, n_rep, S, D]
         // We reshape K, V to [B, n_kv_heads, 1, S, D]
         // SDPA will treat the first 3 dims as batch and broadcast the 1 to n_rep automatically.
-        
+
         // xq comes in as [B, n_heads, S, D]. Transpose to [B, S, n_heads, D] was planned, 
         // but we need to align with keys first.
-        
+
         // Current shapes:
         // xq: [B, n_heads, S, D] -> View as [B, n_kv_heads, n_rep, S, D]
         // keys: [B, n_kv_heads, S, D] -> View as [B, n_kv_heads, 1, S, D]
-        
+
         auto xq_view = xq.view({bsz, n_kv_heads, n_rep, seqlen, head_dim});
         auto keys_view = keys.view({bsz, n_kv_heads, 1, seqlen, head_dim});
         auto values_view = values.view({bsz, n_kv_heads, 1, seqlen, head_dim});

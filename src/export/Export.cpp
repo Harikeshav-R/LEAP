@@ -5,6 +5,7 @@
 #include <fstream>
 #include <vector>
 #include <algorithm>
+#include <future>
 
 namespace Export {
     // Helper to write primitive types to file
@@ -172,32 +173,96 @@ namespace Export {
             torch::Tensor s;
             float err;
         };
-        std::vector<QuantResult> results(weights.size());
 
-        std::cout << "Quantizing " << weights.size() << " tensors (Parallel)..." << std::endl;
-#pragma omp parallel for schedule(dynamic)
-        for (size_t i = 0; i < weights.size(); ++i) {
-            auto result = quantize_q80(weights[i], group_size);
-            results[i] = {std::get < 0 > (result), std::get < 1 > (result), std::get < 2 > (result)};
+        // Pipeline: 
+        // We process weights one by one (or in small batches) to save memory, 
+        // but we want to parallelize quantization of tensor N with writing of tensor N-1.
+
+        // Since we already have all weights loaded in memory (from Loader.cpp), 
+        // we can stick to the existing structure but optimize the write phase.
+        // Actually, the previous code quantized ALL weights in parallel first, storing ALL results in RAM.
+        // That is fast for compute but OOM-risky for 70B models (needs 2x model size in RAM).
+
+        // Better approach for large models:
+        // Stream processing: Quantize W[i] -> Write W[i] -> Free W[i]
+        // Parallel approach: Background Writer.
+
+        // However, keeping the current architecture (RAM rich assumption based on loading full model first):
+        // The previous code:
+        // 1. Quantize ALL (Parallel) -> high peak RAM, fast compute.
+        // 2. Write ALL (Sequential) -> bottleneck.
+
+        // We will keep the "Quantize ALL" approach if RAM permits (as implied by current Loader),
+        // but since we are optimizing, let's assume we want to support huge models better 
+        // OR just optimize the write speed.
+
+        // Actually, the previous code quantized *everything* into `results` vector first.
+        // Then wrote everything. 
+        // This effectively requires 2x memory (FP32 weights + Int8 weights + Scales).
+
+        // OPTIMIZED PIPELINE (Low Memory + High Speed):
+        // Loop i from 0 to N:
+        //   Launch Async Quantize(i+1)
+        //   Write(i) (if i >= 0)
+        //   Join Quantize(i+1)
+
+        // Let's implement a simple Lookahead Pipeline.
+
+        std::cout << "Quantizing and writing weights (Pipelined)..." << std::endl;
+
+        // We will use a double-buffer slot approach.
+        // Current ready result
+        QuantResult current_res;
+        bool current_ready = false;
+
+        // Future for next result
+        std::future<QuantResult> next_res_future;
+
+        auto launch_quantize = [&](size_t idx) {
+            return std::async(std::launch::async, [=, &weights]() {
+                auto result = quantize_q80(weights[idx], group_size);
+                return QuantResult{std::get < 0 > (result), std::get < 1 > (result), std::get < 2 > (result)};
+            });
+        };
+
+        // Start first job
+        if (!weights.empty()) {
+            next_res_future = launch_quantize(0);
         }
 
-        std::cout << "Writing quantized weights..." << std::endl;
         for (size_t i = 0; i < weights.size(); ++i) {
-            const auto &w = weights[i];
-            const auto &res = results[i];
+            // Wait for current quantization to finish
+            if (next_res_future.valid()) {
+                current_res = next_res_future.get();
+                current_ready = true;
+            }
 
-            serialize_int8(out_file, res.q);
-            serialize_fp32(out_file, res.s);
+            // Prefetch/Start next quantization immediately
+            if (i + 1 < weights.size()) {
+                next_res_future = launch_quantize(i + 1);
+            }
 
-            errors[i] = res.err;
+            // Now Write Current (IO Bound)
+            // While this writes, the next quantization (CPU Bound) is happening in background thread
+            const auto &w = weights[i]; // Original weight for logging shape
 
-            // Format shape for logging
+            serialize_int8(out_file, current_res.q);
+            serialize_fp32(out_file, current_res.s);
+
+            errors[i] = current_res.err;
+
+            // Logging
             std::string shape_str = "(";
             for (int k = 0; k < w.dim(); ++k) shape_str += std::to_string(w.size(k)) + (k < w.dim() - 1 ? ", " : "");
             shape_str += ")";
 
             std::cout << (i + 1) << "/" << weights.size() << " saved " << shape_str
-                    << " (max error " << res.err << ")" << std::endl;
+                    << " (max error " << current_res.err << ")" << std::endl;
+
+            // Optional: Free the original weight memory if we own it uniquely to save RAM?
+            // Since `weights` vector holds copies or views, usually we can't easily free here 
+            // without destructing the tensor, but `weights[i] = torch::Tensor();` might help if refs allow.
+            // keeping it simple.
         }
 
         if (!errors.empty()) {

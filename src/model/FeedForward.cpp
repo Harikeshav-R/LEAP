@@ -17,19 +17,19 @@ namespace Model {
 
     torch::Tensor FeedForwardImpl::forward(const torch::Tensor &x) {
         // SwiGLU: w2(silu(w1(x)) * w3(x))
-        
+
         // 1. Calculate w1(x)
         auto val = w1->forward(x);
-        
+
         // 2. Apply SiLU in-place
         torch::silu_(val);
-        
+
         // 3. Multiply by w3(x) in-place
         val.mul_(w3->forward(x));
-        
+
         // 4. Project back via w2
         val = w2->forward(val);
-        
+
         // 5. Dropout
         return dropout_layer->forward(val);
     }

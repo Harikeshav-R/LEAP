@@ -8,7 +8,30 @@ if (NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif ()
 
-set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -march=native -O3")
+# ------------------------------------------------------------------------------
+# 0. Optimization Flags & Setup
+# ------------------------------------------------------------------------------
+
+# Check for LTO/IPO support (Link Time Optimization)
+include(CheckIPOSupported)
+check_ipo_supported(RESULT ipo_supported OUTPUT ipo_output)
+if (ipo_supported)
+    message(STATUS "IPO / LTO supported. Enabling for Release builds.")
+else ()
+    message(STATUS "IPO / LTO not supported: ${ipo_output}")
+endif ()
+
+# Apply aggressive optimizations for Release builds
+if (NOT MSVC)
+    # -march=native: Enable all instructions supported by the compiling machine (AVX2, NEON, etc.)
+    # -mtune=native: Tune for the compiling machine
+    # -ffast-math: Allow aggressive floating point optimizations (breaks strict IEEE compliance, good for AI)
+    # -funroll-loops: Aggressive loop unrolling
+    # -fomit-frame-pointer: Free up a register
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -march=native -mtune=native -ffast-math -funroll-loops -fomit-frame-pointer")
+else ()
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /O2 /arch:AVX2 /fp:fast")
+endif ()
 
 # ------------------------------------------------------------------------------
 # 1. Dependency Setup
@@ -26,7 +49,7 @@ FetchContent_MakeAvailable(json)
 FetchContent_Declare(
         safetensors_cpp
         GIT_REPOSITORY https://github.com/syoyo/safetensors-cpp
-        GIT_TAG main  # Or a specific commit hash for stability
+        GIT_TAG main
 )
 FetchContent_MakeAvailable(safetensors_cpp)
 
@@ -56,7 +79,7 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fexceptions")
 # --- Tokenizers ---
 add_subdirectory("${CMAKE_SOURCE_DIR}/third-party/tokenizers")
 
-# --- OpenMP Configuration (Required for all) ---
+# --- OpenMP Configuration ---
 set(USE_CUSTOM_OMP OFF)
 if (APPLE)
     find_program(BREW_PROG brew)
@@ -89,12 +112,9 @@ endif ()
 add_executable(export
         src/export/Export.cpp
         src/export/Export.h
-
         src/export/Loader.cpp
         src/export/Loader.h
-
         src/export/main.cpp
-
         src/export/Utils.cpp
         src/export/Utils.h
 )
@@ -103,53 +123,38 @@ target_include_directories(export PRIVATE third-party/tokenizers/third-party/jso
 
 add_executable(inference
         src/inference/Config.h
-
         src/inference/FloatTransformer.cpp
         src/inference/FloatTransformer.h
-
         src/inference/main.cpp
-
         src/inference/QuantizedTransformer.cpp
         src/inference/QuantizedTransformer.h
-
         src/inference/Sampler.cpp
         src/inference/Sampler.h
-
         src/inference/Tokenizer.cpp
         src/inference/Tokenizer.h
-
         src/inference/Transformer.h
-
         src/inference/TransformerFactory.cpp
-
         src/inference/Utils.h
 )
 
 add_library(model
         src/model/Attention.cpp
         src/model/Attention.h
-
         src/model/FeedForward.cpp
         src/model/FeedForward.h
-
         src/model/ModelArgs.h
-
         src/model/RMSNorm.cpp
         src/model/RMSNorm.h
-
         src/model/TransformerBlock.cpp
         src/model/TransformerBlock.h
-
         src/model/Transformer.cpp
         src/model/Transformer.h
-
         src/model/Utils.cpp
         src/model/Utils.h
 )
 
 add_executable(tokenizer
         src/tokenizer/main.cpp
-
         src/tokenizer/Tokenizer.cpp
         src/tokenizer/Tokenizer.h
 )
@@ -159,22 +164,17 @@ add_executable(tokenizer
 # ------------------------------------------------------------------------------
 
 # --- Target: Export ---
-# Needs: LibTorch + OpenMP
 target_link_libraries(export PRIVATE ${TORCH_LIBRARIES} model nlohmann_json::nlohmann_json safetensors_cpp)
 
 # --- Target: Inference ---
-# Needs: OpenMP Only (No Torch)
-# If inference needs the tokenizer library, add 'tokenizers' here too.
-# target_link_libraries(inference PRIVATE tokenizers)
+# Note: -ffast-math is already enabled globally above, but explicit options for headers are fine
 target_compile_options(inference PRIVATE $<$<CONFIG:Release>:-ffast-math>)
 
 # --- Target: Model ---
-# Needs: LibTorch
 target_include_directories(model PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/model)
 target_link_libraries(model PUBLIC ${TORCH_LIBRARIES})
 
 # --- Target: Tokenizer ---
-# Needs: LibTorch + Tokenizers Lib + OpenMP
 target_link_libraries(tokenizer PRIVATE ${TORCH_LIBRARIES} tokenizers)
 
 target_compile_options(export PRIVATE -fexceptions)
@@ -195,5 +195,10 @@ foreach (TARGET_NAME ${OMP_TARGETS})
         target_link_libraries(${TARGET_NAME} PRIVATE omp)
     else ()
         target_link_libraries(${TARGET_NAME} PRIVATE OpenMP::OpenMP_CXX)
+    endif ()
+
+    # Enable LTO if supported
+    if (ipo_supported)
+        set_property(TARGET ${TARGET_NAME} PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
     endif ()
 endforeach ()

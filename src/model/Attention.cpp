@@ -1,23 +1,14 @@
 #include "Attention.h"
 #include "Utils.h"
 
-
 namespace Model {
     AttentionImpl::AttentionImpl(const ModelArgs &args) {
         n_heads = args.n_heads;
-        n_kv_heads = args.n_kv_heads.has_value() ? args.n_kv_heads.value() : args.n_heads;
-
-        TORCH_CHECK(args.n_heads % n_kv_heads == 0, "n_heads must be divisible by n_kv_heads");
-
-        constexpr int model_parallel_size = 1;
-        n_local_heads = n_heads / model_parallel_size;
-        n_local_kv_heads = n_kv_heads / model_parallel_size;
-        n_rep = n_local_heads / n_local_kv_heads;
-        head_dim = args.dim / args.n_heads;
+        n_kv_heads = args.n_kv_heads.value_or(args.n_heads);
+        n_rep = n_heads / n_kv_heads;
+        head_dim = args.dim / n_heads;
         dropout_prob = args.dropout;
 
-        // Register Linear layers
-        // Note: Python nn.Linear defaults are bias=True, but code specifies bias=False
         wq = register_module(
             "wq", torch::nn::Linear(torch::nn::LinearOptions(args.dim, n_heads * head_dim).bias(false)));
         wk = register_module(
@@ -27,59 +18,92 @@ namespace Model {
         wo = register_module(
             "wo", torch::nn::Linear(torch::nn::LinearOptions(n_heads * head_dim, args.dim).bias(false)));
 
-        // Register Dropout layers
         attn_dropout = register_module("attn_dropout", torch::nn::Dropout(args.dropout));
         resid_dropout = register_module("resid_dropout", torch::nn::Dropout(args.dropout));
     }
 
     torch::Tensor AttentionImpl::forward(
         const torch::Tensor &x,
-        const torch::Tensor &freqs_cos,
-        const torch::Tensor &freqs_sin
+        const torch::Tensor &freqs_cis,
+        const int64_t start_pos,
+        const std::optional<KVCache> &kv_cache
     ) {
-        auto bsz = x.size(0);
-        auto seqlen = x.size(1);
+        const auto bsz = x.size(0);
+        const auto seqlen = x.size(1);
 
-        // QKV
-        torch::Tensor xq = wq->forward(x);
-        torch::Tensor xk = wk->forward(x);
-        torch::Tensor xv = wv->forward(x);
+        auto xq = wq->forward(x).view({bsz, seqlen, n_heads, head_dim});
+        auto xk = wk->forward(x).view({bsz, seqlen, n_kv_heads, head_dim});
+        const auto xv = wv->forward(x).view({bsz, seqlen, n_kv_heads, head_dim});
 
-        // View reshape
-        xq = xq.view({bsz, seqlen, n_local_heads, head_dim});
-        xk = xk.view({bsz, seqlen, n_local_kv_heads, head_dim});
-        xv = xv.view({bsz, seqlen, n_local_kv_heads, head_dim});
+        std::tie(xq, xk) = apply_rotary_emb(xq, xk, freqs_cis);
 
-        // RoPE relative positional embeddings
-        // We use std::tie to unpack the pair returned by the external function
-        std::tie(xq, xk) = apply_rotary_emb(xq, xk, freqs_cos, freqs_sin);
+        // KV Cache Management
+        torch::Tensor keys, values;
 
-        // Grouped multiquery attention: expand out keys and values
-        xk = repeat_kv(xk, n_rep); // (bs, seqlen, n_local_heads, head_dim)
-        xv = repeat_kv(xv, n_rep); // (bs, seqlen, n_local_heads, head_dim)
+        if (kv_cache.has_value()) {
+            // Transpose to [B, n_kv, S, D] for storage
+            const auto xk_t = xk.transpose(1, 2);
+            const auto xv_t = xv.transpose(1, 2);
 
-        // Make heads into a batch dimension
-        xq = xq.transpose(1, 2); // (bs, n_local_heads, seqlen, head_dim)
-        xk = xk.transpose(1, 2);
-        xv = xv.transpose(1, 2);
+            // Update cache in-place
+            // cache.k[:, :, start_pos : start_pos+seqlen, :] = xk_t
+            // We use .copy_() for safe in-place update
+            kv_cache->k.slice(2, start_pos, start_pos + seqlen).copy_(xk_t);
+            kv_cache->v.slice(2, start_pos, start_pos + seqlen).copy_(xv_t);
 
-        torch::Tensor output = at::scaled_dot_product_attention(
-            xq,
-            xk,
-            xv,
+            // Retrieve full history for attention: [0 ... start_pos + seqlen]
+            keys = kv_cache->k.slice(2, 0, start_pos + seqlen);
+            values = kv_cache->v.slice(2, 0, start_pos + seqlen);
+        } else {
+            // No cache (training or simple inference), use current only
+            keys = xk.transpose(1, 2);
+            values = xv.transpose(1, 2);
+        }
+
+        // Grouped Query Attention: Zero-Copy Broadcasting
+        // We reshape Q to [B, n_kv_heads, n_rep, S, D]
+        // We reshape K, V to [B, n_kv_heads, 1, S, D]
+        // SDPA will treat the first 3 dims as batch and broadcast the 1 to n_rep automatically.
+
+        // xq comes in as [B, n_heads, S, D]. Transpose to [B, S, n_heads, D] was planned, 
+        // but we need to align with keys first.
+
+        // Current shapes:
+        // xq: [B, n_heads, S, D] -> View as [B, n_kv_heads, n_rep, S, D]
+        // keys: [B, n_kv_heads, S, D] -> View as [B, n_kv_heads, 1, S, D]
+
+        xq = xq.transpose(1, 2).contiguous();
+        // Current shapes before SDPA:
+        // xq:   [B, n_heads, S_q, D] -> View as [B, n_kv_heads, n_rep, S_q, D]
+        // keys: [B, n_kv_heads, S_kv, D] -> View as [B, n_kv_heads, 1, S_kv, D]
+        //
+        // Note: S_q is the current seqlen, while S_kv (kv_len) may be larger when using KV cache.
+        const auto kv_len = keys.size(2);
+        const auto xq_view = xq.view({bsz, n_kv_heads, n_rep, seqlen, head_dim});
+        const auto keys_view = keys.contiguous().view({bsz, n_kv_heads, 1, kv_len, head_dim});
+        const auto values_view = values.contiguous().view({bsz, n_kv_heads, 1, kv_len, head_dim});
+
+        // Flash Attention / Scaled Dot Product Attention
+        // If seqlen > 1, we are in prefill (processing prompt), so we need a causal mask.
+        // If seqlen == 1, we are in decoding (generating one token), attending to all past keys (kv_cache).
+        const bool is_causal = seqlen > 1;
+
+        auto output = at::scaled_dot_product_attention(
+            xq_view,
+            keys_view,
+            values_view,
             std::nullopt,
             is_training() ? dropout_prob : 0.0,
-            true
+            is_causal
         );
 
-        // Restore time as batch dimension and concat heads
-        // output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
+        // Output is [B, n_kv_heads, n_rep, S, D]
+        // We need [B, S, n_heads, D] effectively, but usually we go to [B, S, H*D] eventually.
+        // Flatten head dims: [B, n_heads, S, D]
+        output = output.view({bsz, n_heads, seqlen, head_dim});
+
+        // Transpose to [B, S, n_heads, D] for final view
         output = output.transpose(1, 2).contiguous().view({bsz, seqlen, -1});
-
-        // Final projection into the residual stream
-        output = wo->forward(output);
-        output = resid_dropout->forward(output);
-
-        return output;
+        return resid_dropout->forward(wo->forward(output));
     }
 } // namespace Model

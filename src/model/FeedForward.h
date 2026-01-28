@@ -1,7 +1,6 @@
 #ifndef LEAP_FEEDFORWARD_H
 #define LEAP_FEEDFORWARD_H
 
-#include <cstdint>
 #include <torch/torch.h>
 
 namespace Model {

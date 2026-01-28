@@ -9,9 +9,9 @@ namespace Tokenizer {
     // However, since the C++ Tiktoken implementation explicitly mentions removing it for RE2 support,
     // we will use the one compatible with the C++ Tiktoken implementation to avoid runtime errors if that implementation is strict.
     // The default pattern in Tiktoken C++ is:
-    // R"((?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+)"
+    // R"((?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+)"
     static const std::string PAT_STR =
-            R"((?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+)";
+            R"((?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+)";
 
     Tokenizer::Tokenizer(const std::string &model_path) : model_path_(model_path) {
         // Construct special tokens list matching Llama 3 specification
@@ -47,8 +47,7 @@ namespace Tokenizer {
             eos_idx
         );
 
-        auto err = model_->load(model_path);
-        if (err != tokenizers::Error::Ok) {
+        if (auto err = model_->load(model_path); err != tokenizers::Error::Ok) {
             throw std::runtime_error("Failed to load tokenizer model: " + model_path);
         }
 

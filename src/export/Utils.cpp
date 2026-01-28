@@ -1,73 +1,102 @@
 #include "Utils.h"
+#include <cmath>
+
+#if defined(_OPENMP)
+#include <omp.h>
+#endif
 
 namespace Export {
     void serialize_fp32(std::ofstream &out, const torch::Tensor &tensor) {
-        // Equivalent to: d = tensor.detach().cpu().view(-1).to(torch.float32).numpy()
-        const torch::Tensor d = tensor.detach().cpu().view({-1}).to(torch::kFloat32);
+        torch::Tensor t = tensor;
+        if (t.device().type() != torch::kCPU) t = t.cpu();
+        if (t.dtype() != torch::kFloat32) t = t.to(torch::kFloat32);
+        if (!t.is_contiguous()) t = t.contiguous();
 
-        // In C++, we access the raw data pointer directly rather than using struct.pack
-        const auto data_ptr = d.data_ptr < float > ();
-        const auto num_bytes = d.numel() * sizeof(float);
-
+        const auto data_ptr = t.data_ptr<float>();
+        const auto num_bytes = t.numel() * sizeof(float);
         out.write(reinterpret_cast<const char *>(data_ptr), num_bytes);
     }
 
     void serialize_int8(std::ofstream &out, const torch::Tensor &tensor) {
-        // Equivalent to: d = tensor.detach().cpu().view(-1).numpy().astype(np.int8)
-        const auto d = tensor.detach().cpu().view({-1}).to(torch::kInt8);
-
-        // Access raw data pointer
-        const auto data_ptr = d.data_ptr < int8_t > ();
-        const auto num_bytes = d.numel() * sizeof(int8_t);
-
+        const auto d = tensor.detach().cpu().to(torch::kInt8);
+        // Note: .to(kInt8) handles contiguous implicitly if needed or returns copy
+        // But to be safe:
+        const auto contig = d.contiguous();
+        const auto data_ptr = contig.data_ptr<int8_t>();
+        const auto num_bytes = contig.numel() * sizeof(int8_t);
         out.write(reinterpret_cast<const char *>(data_ptr), num_bytes);
     }
 
+    // Optimized CPU Quantization implementation
+    // Avoids allocating multiple intermediate tensors
     std::tuple<torch::Tensor, torch::Tensor, float> quantize_q80(const torch::Tensor &w_in, int64_t group_size) {
-        // assert w.numel() % group_size == 0
-        TORCH_CHECK(w_in.numel() % group_size == 0, "Tensor numel must be divisible by group_size");
+        // Ensure CPU float32 contiguous
+        const torch::Tensor w = w_in.to(torch::kCPU, torch::kFloat32).contiguous();
+        const float *w_data = w.data_ptr<float>();
+        int64_t numel = w.numel();
 
-        // w = w.float()
-        torch::Tensor w = w_in.to(torch::kFloat32);
+        TORCH_CHECK(numel % group_size == 0, "Tensor numel must be divisible by group_size");
 
-        // w = w.reshape(-1, group_size)
-        w = w.reshape({-1, group_size});
+        int64_t num_groups = numel / group_size;
 
-        // find the max in each group: wmax = torch.abs(w).max(dim=1).values
-        // In LibTorch, max returns a tuple (values, indices)
-        const auto w_abs = torch::abs(w);
-        const auto max_res = torch::max(w_abs, /*dim=*/1);
-        const auto wmax = std::get < 0 > (max_res);
+        // Output tensors
+        auto int8val = torch::empty({numel}, torch::kInt8);
+        auto *q_data = int8val.data_ptr<int8_t>();
 
-        // calculate the scaling factor such that float = quant * scale
-        // scale = wmax / 127.0
-        auto scale = wmax / 127.0;
+        auto scale = torch::empty({num_groups}, torch::kFloat32);
+        auto *s_data = scale.data_ptr<float>();
 
-        // scale into range [-127, 127]
-        // quant = w / scale[:, None]
-        // LibTorch broadcasting requires unsqueeze to match dimensions
-        const auto quant = w / scale.unsqueeze(1);
+        // Track max error
+        float global_max_err = 0.0f;
 
-        // round to nearest integer: int8val = torch.round(quant).to(torch.int8)
-        auto int8val = torch::round(quant).to(torch::kInt8);
+        // Parallelize over groups
+#pragma omp parallel for reduction(max: global_max_err)
+        for (int64_t g = 0; g < num_groups; ++g) {
+            const float *group_w = w_data + g * group_size;
+            int8_t *group_q = q_data + g * group_size;
 
-        // dequantize by rescaling
-        // fp32val = (int8val.float() * scale[:, None]).view(-1)
-        const auto fp32val = (int8val.to(torch::kFloat32) * scale.unsqueeze(1)).view({-1});
+            // 1. Find max absolute value
+            float wmax = 0.0f;
+            for (int64_t i = 0; i < group_size; ++i) {
+                if (const float val = std::abs(group_w[i]); val > wmax) wmax = val;
+            }
 
-        // fp32valr = fp32val.reshape(-1, group_size)
-        const auto fp32valr = fp32val.reshape({-1, group_size});
+            // 2. Calculate scale
+            const float s = wmax / 127.0f;
+            s_data[g] = s;
 
-        // calculate the max error in each group
-        // err = torch.abs(fp32valr - w).max(dim=1).values
-        const auto diff = torch::abs(fp32valr - w);
-        const auto err_res = torch::max(diff, /*dim=*/1);
-        const auto err = std::get < 0 > (err_res);
+            // Avoid division by zero
+            const float inv_s = (s != 0.0f) ? (1.0f / s) : 0.0f;
 
-        // find the max error across all groups
-        // maxerr = err.max().item()
-        auto maxerr = err.max().item<float>();
+            // 3. Quantize and Compute Error
+            float max_grp_err = 0.0f;
 
-        return std::make_tuple(int8val, scale, maxerr);
+            for (int64_t i = 0; i < group_size; ++i) {
+                const float val = group_w[i];
+                const float q_float = val * inv_s;
+
+                // Round to nearest integer
+                const auto q = static_cast<int8_t>(std::round(q_float));
+                group_q[i] = q;
+
+                // Dequantize to check error
+                const float dq = q * s;
+                if (const float err = std::abs(dq - val); err > max_grp_err) max_grp_err = err;
+            }
+
+            if (max_grp_err > global_max_err) {
+                global_max_err = max_grp_err;
+            }
+        }
+
+        // Reshape outputs to match expected return shapes
+        // int8val: flattened is fine, or reshape to {num_groups, group_size} ?
+        // The original code returned: int8val shaped as {numel} (via .view(-1)) inside logic but logically {num_groups, group_size}
+        // Actually original: w.reshape({-1, group_size}) -> int8val same shape.
+        // But serialize_int8 flattens it anyway.
+        // Let's reshape to match original logic behavior: {num_groups, group_size}
+        int8val = int8val.view({num_groups, group_size});
+
+        return std::make_tuple(int8val, scale, global_max_err);
     }
 } // namespace Export

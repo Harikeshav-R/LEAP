@@ -12,23 +12,27 @@ namespace Inference {
     };
 
     struct QuantizedTransformerWeights {
-        QuantizedTensor *q_tokens; // (vocab_size, dim)
-        float *token_embedding_table; // same, but dequantized
+        std::vector<QuantizedTensor> q_tokens; // (vocab_size, dim)
+        std::vector<float> token_embedding_table; // same, but dequantized
 
         float *rms_att_weight;
         float *rms_ffn_weight;
 
-        QuantizedTensor *wq;
-        QuantizedTensor *wk;
-        QuantizedTensor *wv;
-        QuantizedTensor *wo;
+        std::vector<QuantizedTensor> wq;
+        std::vector<QuantizedTensor> wk;
+        std::vector<QuantizedTensor> wv;
+        std::vector<QuantizedTensor> wo;
 
-        QuantizedTensor *w1;
-        QuantizedTensor *w2;
-        QuantizedTensor *w3;
+        std::vector<QuantizedTensor> w1;
+        std::vector<QuantizedTensor> w2;
+        std::vector<QuantizedTensor> w3;
 
         float *rms_final_weight;
-        QuantizedTensor *wcls;
+
+        // If shared, points to q_tokens.data(). If not, points to wcls_storage.data().
+        const QuantizedTensor *wcls;
+        // Storage for non-shared classifier weights
+        std::vector<QuantizedTensor> wcls_storage;
     };
 
     struct QuantizedRunState {
@@ -46,13 +50,8 @@ namespace Inference {
         std::vector<float> hq_s;
 
         std::vector<float> q;
-        std::vector<float> k; // pointer-like in original, but here we might allocate if needed or just use as buffer
-        // Original QuantizedTransformer malloced k and v in malloc_run_state, unlike FloatTransformer?
-        // Let's check original.
-        // state.k = calloc(kv_dim...)
-        // Yes, QuantizedTransformer malloced them.
-
-        std::vector<float> v;
+        std::vector<float> k; // Temporary buffer for current token Key
+        std::vector<float> v; // Temporary buffer for current token Value
         std::vector<float> att;
         std::vector<float> logits;
         std::vector<float> key_cache;
@@ -76,18 +75,22 @@ namespace Inference {
         size_t file_size;
         int group_size; // GS
 
+        // RoPE lookup tables
+        std::vector<float> rope_cos;
+        std::vector<float> rope_sin;
+
         void memory_map_weights(void *ptr, int shared_weights);
 
         void init_run_state();
 
+        void precompute_freqs();
+
         // Helpers
-        QuantizedTensor *init_quantized_tensors(void **ptr, int n, int size_each) const;
+        std::vector<QuantizedTensor> init_quantized_tensors(void **ptr, int n, int size_each) const;
 
         void dequantize(const QuantizedTensor *qx, float *x, int n) const;
 
         void quantize(const QuantizedTensor *qx, const float *x, int n) const;
-
-        // Helper to wrap vectors into QuantizedTensor for method calls
 
         static void rmsnorm(float *o, const float *x, const float *weight, int size);
 

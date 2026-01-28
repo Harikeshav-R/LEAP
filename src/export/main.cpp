@@ -85,7 +85,7 @@ ProgramArgs parse_arguments(const int argc, char *argv[]) {
 // Core Logic
 
 // Python: def model_export(model, filepath, version):
-void model_export(const Model::Transformer &model, const std::string &filepath, int version) {
+void model_export(const Model::Transformer &model, const std::string &filepath, const int version) {
     if (version == 1) {
         Export::float32_export(model, filepath);
     } else if (version == 2) {

@@ -2,7 +2,14 @@
 #include "Utils.h"
 #include <cmath>
 #include <algorithm>
+#include <vector>
+#include <iterator>
 
+#if defined(__x86_64__) || defined(_M_X64)
+#include <immintrin.h>
+#elif defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
 
 namespace Inference {
     Sampler::Sampler(const int vocab_size, const float temperature, const float topp, const unsigned long long rng_seed)
@@ -11,15 +18,105 @@ namespace Inference {
     }
 
     int Sampler::sample_argmax(const float *probabilities, const int n) {
-        int max_i = 0;
-        float max_p = probabilities[0];
-        for (int i = 1; i < n; i++) {
-            if (probabilities[i] > max_p) {
-                max_i = i;
-                max_p = probabilities[i];
+#if defined(__AVX2__)
+        // AVX2 vectorized argmax
+        if (n >= 8) {
+            float max_val = -1e30f;
+            int max_idx = 0;
+
+            __m256 max_v = _mm256_set1_ps(-1e30f);
+            __m256i max_idx_v = _mm256_setzero_si256();
+
+            __m256i idx_v = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+            const __m256i inc_v = _mm256_set1_epi32(8);
+
+            int i = 0;
+            for (; i <= n - 8; i += 8) {
+                __m256 val = _mm256_loadu_ps(probabilities + i);
+                __m256 mask = _mm256_cmp_ps(val, max_v, _CMP_GT_OQ);
+                max_v = _mm256_blendv_ps(max_v, val, mask);
+
+                __m256i mask_i = _mm256_castps_si256(mask);
+                // blendv_epi8 blends bytes. We need 32-bit integer blend.
+                // If mask has all 1s or 0s in 32-bit lanes (which cmp_ps does), blendv_epi8 works fine for 32-bit ints too.
+                max_idx_v = _mm256_blendv_epi8(max_idx_v, idx_v, mask_i);
+
+                idx_v = _mm256_add_epi32(idx_v, inc_v);
             }
+
+            float vals[8];
+            int idxs[8];
+            _mm256_storeu_ps(vals, max_v);
+            _mm256_storeu_si256(reinterpret_cast<__m256i *>(idxs), max_idx_v);
+
+            max_val = vals[0];
+            max_idx = idxs[0];
+
+            for (int k = 1; k < 8; ++k) {
+                if (vals[k] > max_val) {
+                    max_val = vals[k];
+                    max_idx = idxs[k];
+                }
+            }
+
+            for (; i < n; ++i) {
+                if (probabilities[i] > max_val) {
+                    max_val = probabilities[i];
+                    max_idx = i;
+                }
+            }
+            return max_idx;
         }
-        return max_i;
+#elif defined(__ARM_NEON)
+        if (n >= 4) {
+            float32x4_t max_v = vdupq_n_f32(-1e30f);
+            uint32x4_t max_idx_v = vdupq_n_u32(0);
+
+            uint32x4_t idx_v = {0, 1, 2, 3};
+            const uint32x4_t inc_v = vdupq_n_u32(4);
+
+            int i = 0;
+            for (; i <= n - 4; i += 4) {
+                const float32x4_t val = vld1q_f32(probabilities + i);
+
+                // Compare val > max_v
+                const uint32x4_t mask = vcgtq_f32(val, max_v);
+
+                // Update max_v: bsl(mask, val, max_v)
+                max_v = vbslq_f32(mask, val, max_v);
+
+                // Update max_idx_v
+                max_idx_v = vbslq_u32(mask, idx_v, max_idx_v);
+
+                idx_v = vaddq_u32(idx_v, inc_v);
+            }
+
+            float vals[4];
+            uint32_t idxs[4];
+            vst1q_f32(vals, max_v);
+            vst1q_u32(idxs, max_idx_v);
+
+            float max_val = vals[0];
+            int max_idx = static_cast<int>(idxs[0]);
+
+            for (int k = 1; k < 4; ++k) {
+                if (vals[k] > max_val) {
+                    max_val = vals[k];
+                    max_idx = static_cast<int>(idxs[k]);
+                }
+            }
+
+            for (; i < n; ++i) {
+                if (probabilities[i] > max_val) {
+                    max_val = probabilities[i];
+                    max_idx = i;
+                }
+            }
+            return max_idx;
+        }
+#endif
+        const auto it = std::max_element(probabilities, probabilities + n);
+        return static_cast<int>(std::distance(probabilities, it));
     }
 
     int Sampler::sample_mult(const float *probabilities, const int n, const float coin) {
@@ -38,6 +135,7 @@ namespace Inference {
                              const float coin) {
         int n0 = 0;
         const float cutoff = (1.0f - topp) / (static_cast<float>(n) - 1.0f);
+
         for (int i = 0; i < n; i++) {
             if (probabilities[i] >= cutoff) {
                 probindex[n0].index = i;
@@ -71,21 +169,30 @@ namespace Inference {
         return probindex[last_idx].index;
     }
 
-    // Helper softmax function
     static void softmax(float *x, const int size) {
+        // 1. Find max for numerical stability
         float max_val = x[0];
-        for (int i = 1; i < size; i++) {
+#pragma omp parallel for reduction(max:max_val)
+        for (int i = 1; i < size; ++i) {
             if (x[i] > max_val) {
                 max_val = x[i];
             }
         }
+
+        // 2. Exp and Sum
         float sum = 0.0f;
+#pragma omp parallel for simd reduction(+:sum)
         for (int i = 0; i < size; i++) {
-            x[i] = std::exp(x[i] - max_val);
-            sum += x[i];
+            const float val = std::exp(x[i] - max_val);
+            x[i] = val;
+            sum += val;
         }
+
+        // 3. Normalize
+        const float inv_sum = 1.0f / sum;
+#pragma omp parallel for simd
         for (int i = 0; i < size; i++) {
-            x[i] /= sum;
+            x[i] *= inv_sum;
         }
     }
 

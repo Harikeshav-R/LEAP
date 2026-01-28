@@ -3,19 +3,21 @@
 namespace Model {
     RMSNormImpl::RMSNormImpl(int64_t dim, const double eps)
         : eps(eps) {
-        // Register the parameter so the optimizer can find it
         weight = register_parameter("weight", torch::ones({dim}));
     }
 
-    torch::Tensor RMSNormImpl::_norm(const torch::Tensor &x) const {
-        auto mean_sq = x.pow(2).mean(/*dim=*/{-1}, /*keepdim=*/true);
-        return x * torch::rsqrt(mean_sq + eps);
-    }
-
     torch::Tensor RMSNormImpl::forward(const torch::Tensor &x) const {
+        // Cast to float32 for stability
         const auto x_float = x.to(torch::kFloat32);
-        const auto normed = _norm(x_float);
-        const auto output = normed.type_as(x);
-        return output * weight;
+
+        // Optimization: Use linalg_vector_norm to compute sqrt(sum(x^2)) without materializing x^2 tensor
+        // mean(x^2) = norm(x)^2 / N
+        const auto norm_x = torch::linalg_vector_norm(x_float, 2, {-1}, true);
+        const auto mean_sq = norm_x.pow_(2) / x_float.size(-1);
+
+        const auto rstd = torch::rsqrt(mean_sq + eps);
+
+        // Convert back to input type and scale
+        return (x_float * rstd).type_as(x) * weight;
     }
 } // namespace Model

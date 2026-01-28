@@ -67,9 +67,8 @@ namespace Inference {
         return piece;
     }
 
-    int Tokenizer::str_lookup(std::string_view str) {
-        const auto it = vocab_lookup.find(str);
-        if (it != vocab_lookup.end()) {
+    int Tokenizer::str_lookup(const std::string_view str) {
+        if (const auto it = vocab_lookup.find(str); it != vocab_lookup.end()) {
             return it->second;
         }
         return -1;
@@ -142,11 +141,11 @@ namespace Inference {
 
         auto comp = [](const PqElement &a, const PqElement &b) {
             // Priority 1: Higher score
-            if (std::abs(std::get < 0 > (a) - std::get < 0 > (b)) > 1e-6) {
-                return std::get < 0 > (a) < std::get < 0 > (b);
+            if (std::abs(std::get<0>(a) - std::get<0>(b)) > 1e-6) {
+                return std::get<0>(a) < std::get<0>(b);
             }
             // Priority 2: Smaller index (leftmost first)
-            return std::get < 1 > (a) > std::get < 1 > (b);
+            return std::get<1>(a) > std::get<1>(b);
         };
 
         std::priority_queue<PqElement, std::vector<PqElement>, decltype(comp)> queue(comp);
@@ -160,7 +159,7 @@ namespace Inference {
             merge_buffer.clear();
             merge_buffer.insert(merge_buffer.end(), s1.begin(), s1.end());
             merge_buffer.insert(merge_buffer.end(), s2.begin(), s2.end());
-            std::string_view merged_view(merge_buffer.data(), merge_buffer.size());
+            const std::string_view merged_view(merge_buffer.data(), merge_buffer.size());
 
             if (const int id = str_lookup(merged_view); id != -1) {
                 queue.emplace(vocab_scores[id], i, next_i, list[i].id, list[next_i].id);
@@ -185,7 +184,7 @@ namespace Inference {
             merge_buffer.clear();
             merge_buffer.insert(merge_buffer.end(), s1.begin(), s1.end());
             merge_buffer.insert(merge_buffer.end(), s2.begin(), s2.end());
-            std::string_view merged_view(merge_buffer.data(), merge_buffer.size());
+            const std::string_view merged_view(merge_buffer.data(), merge_buffer.size());
 
             const int merged_id = str_lookup(merged_view);
             if (merged_id == -1) continue; // Should not happen given initial scan, but safety first
@@ -210,7 +209,7 @@ namespace Inference {
                 merge_buffer.clear();
                 merge_buffer.insert(merge_buffer.end(), ps1.begin(), ps1.end());
                 merge_buffer.insert(merge_buffer.end(), ps2.begin(), ps2.end());
-                std::string_view p_view(merge_buffer.data(), merge_buffer.size());
+                const std::string_view p_view(merge_buffer.data(), merge_buffer.size());
 
                 if (const int pid = str_lookup(p_view); pid != -1) {
                     queue.emplace(vocab_scores[pid], prev_i, left_idx, list[prev_i].id, merged_id);
@@ -225,7 +224,7 @@ namespace Inference {
                 merge_buffer.clear();
                 merge_buffer.insert(merge_buffer.end(), ns1.begin(), ns1.end());
                 merge_buffer.insert(merge_buffer.end(), ns2.begin(), ns2.end());
-                std::string_view n_view(merge_buffer.data(), merge_buffer.size());
+                const std::string_view n_view(merge_buffer.data(), merge_buffer.size());
 
                 if (const int nid = str_lookup(n_view); nid != -1) {
                     queue.emplace(vocab_scores[nid], left_idx, next_next_i, merged_id, list[next_next_i].id);

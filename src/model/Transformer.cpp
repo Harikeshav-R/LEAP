@@ -1,6 +1,5 @@
 #include "Transformer.h"
 #include <cmath>
-#include <iostream>
 #include "Utils.h"
 
 namespace Model {
@@ -25,7 +24,7 @@ namespace Model {
 
         tok_embeddings->weight = output->weight;
 
-        auto freqs = precompute_freqs_cis(
+        const auto freqs = precompute_freqs_cis(
             params.dim / params.n_heads,
             params.max_seq_len
         );
@@ -98,7 +97,7 @@ namespace Model {
     }
 
     torch::Tensor TransformerImpl::generate(
-        torch::Tensor idx,
+        const torch::Tensor &idx,
         const int64_t max_new_tokens,
         const double temperature,
         const std::optional<int64_t> top_k
@@ -132,7 +131,7 @@ namespace Model {
         torch::Tensor idx_cond = idx;
 
         for (int64_t i = 0; i < max_new_tokens; ++i) {
-            int64_t start_pos = (i == 0) ? 0 : (T + i - 1);
+            const int64_t start_pos = (i == 0) ? 0 : (T + i - 1);
             int64_t end_pos = T + i; // Used only for buffer writing
 
             // Forward pass with cache
@@ -143,7 +142,7 @@ namespace Model {
 
             if (temperature == 0.0) {
                 auto max_result = logits.topk(1, -1);
-                idx_next = std::get < 1 > (max_result);
+                idx_next = std::get<1>(max_result);
             } else {
                 if (std::abs(temperature - 1.0) > 1e-6) {
                     logits /= temperature;
@@ -151,7 +150,7 @@ namespace Model {
                 if (top_k.has_value()) {
                     const int64_t k = std::min(top_k.value(), logits.size(-1));
                     auto topk_result = logits.topk(k);
-                    auto v = std::get < 0 > (topk_result);
+                    auto v = std::get<0>(topk_result);
                     auto pivot = v.select(1, -1).unsqueeze(1);
                     logits = torch::where(logits < pivot,
                                           torch::tensor(-std::numeric_limits<float>::infinity(), logits.options()),

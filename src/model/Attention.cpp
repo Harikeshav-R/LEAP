@@ -33,7 +33,7 @@ namespace Model {
 
         auto xq = wq->forward(x).view({bsz, seqlen, n_heads, head_dim});
         auto xk = wk->forward(x).view({bsz, seqlen, n_kv_heads, head_dim});
-        auto xv = wv->forward(x).view({bsz, seqlen, n_kv_heads, head_dim});
+        const auto xv = wv->forward(x).view({bsz, seqlen, n_kv_heads, head_dim});
 
         std::tie(xq, xk) = apply_rotary_emb(xq, xk, freqs_cis);
 
@@ -42,8 +42,8 @@ namespace Model {
 
         if (kv_cache.has_value()) {
             // Transpose to [B, n_kv, S, D] for storage
-            auto xk_t = xk.transpose(1, 2);
-            auto xv_t = xv.transpose(1, 2);
+            const auto xk_t = xk.transpose(1, 2);
+            const auto xv_t = xv.transpose(1, 2);
 
             // Update cache in-place
             // cache.k[:, :, start_pos : start_pos+seqlen, :] = xk_t
@@ -72,14 +72,14 @@ namespace Model {
         // xq: [B, n_heads, S, D] -> View as [B, n_kv_heads, n_rep, S, D]
         // keys: [B, n_kv_heads, S, D] -> View as [B, n_kv_heads, 1, S, D]
 
-        auto xq_view = xq.view({bsz, n_kv_heads, n_rep, seqlen, head_dim});
-        auto keys_view = keys.view({bsz, n_kv_heads, 1, seqlen, head_dim});
-        auto values_view = values.view({bsz, n_kv_heads, 1, seqlen, head_dim});
+        const auto xq_view = xq.view({bsz, n_kv_heads, n_rep, seqlen, head_dim});
+        const auto keys_view = keys.view({bsz, n_kv_heads, 1, seqlen, head_dim});
+        const auto values_view = values.view({bsz, n_kv_heads, 1, seqlen, head_dim});
 
         // Flash Attention / Scaled Dot Product Attention
         // If seqlen > 1, we are in prefill (processing prompt), so we need a causal mask.
         // If seqlen == 1, we are in decoding (generating one token), attending to all past keys (kv_cache).
-        bool is_causal = seqlen > 1;
+        const bool is_causal = seqlen > 1;
 
         auto output = at::scaled_dot_product_attention(
             xq_view,

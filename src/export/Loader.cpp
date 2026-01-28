@@ -55,7 +55,7 @@ namespace Export {
 
             auto options = torch::TensorOptions().dtype(get_dtype(tensor_info.dtype));
             const size_t offset = tensor_info.data_offsets[0];
-            void *data_ptr = static_cast<void *>(base_ptr + offset);
+            const auto data_ptr = static_cast<void *>(base_ptr + offset);
 
             // Create tensor from blob.
             // .clone() is ESSENTIAL here because safetensors_t destructor might unmap memory.
@@ -153,9 +153,8 @@ namespace Export {
 
         // Handle HF -> Meta keys
         bool has_tok = state_dict.contains("tok_embeddings.weight");
-        bool has_embed = state_dict.contains("model.embed_tokens.weight");
 
-        if (!has_tok && has_embed) {
+        if (bool has_embed = state_dict.contains("model.embed_tokens.weight"); !has_tok && has_embed) {
             std::cout << "Transforming Hugging Face keys to Meta format..." << std::endl;
             std::map<std::string, torch::Tensor> new_state_dict;
 
@@ -209,7 +208,7 @@ namespace Export {
                 int layer_i = -1;
                 try { layer_i = std::stoi(parts[2]); } catch (...) { continue; }
 
-                std::string suffix = "";
+                std::string suffix;
                 for (size_t k = 3; k < parts.size(); ++k) {
                     suffix += parts[k];
                     if (k < parts.size() - 1) suffix += ".";

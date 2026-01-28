@@ -1,7 +1,6 @@
 #ifndef LEAP_UTILS_H
 #define LEAP_UTILS_H
 
-#include <cstdint>
 #include <torch/torch.h>
 
 namespace Model {

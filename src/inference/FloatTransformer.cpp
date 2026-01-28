@@ -5,7 +5,6 @@
 #include <stdexcept>
 #include <iostream>
 #include <algorithm>
-#include <cstring>
 
 #if defined(__ARM_NEON)
 #include <arm_neon.h>
@@ -81,7 +80,7 @@ namespace Inference {
         int j = 0;
 
         for (; j <= size - 4; j += 4) {
-            float32x4_t val = vld1q_f32(x + j);
+            const float32x4_t val = vld1q_f32(x + j);
 
             sum_vec = vmlaq_f32(sum_vec, val, val);
         }
@@ -140,9 +139,9 @@ namespace Inference {
         ss += 1e-5f;
 
 #if defined(__ARM_NEON)
-        float32x4_t ss_v = vdupq_n_f32(ss);
+        const float32x4_t ss_v = vdupq_n_f32(ss);
         float32x4_t rsqrt_est = vrsqrteq_f32(ss_v);
-        float32x4_t rsqrt_step = vrsqrtsq_f32(ss_v, vmulq_f32(rsqrt_est, rsqrt_est));
+        const float32x4_t rsqrt_step = vrsqrtsq_f32(ss_v, vmulq_f32(rsqrt_est, rsqrt_est));
         rsqrt_est = vmulq_f32(rsqrt_est, rsqrt_step);
         ss = vgetq_lane_f32(rsqrt_est, 0);
 #elif defined(__AVX2__)
@@ -162,14 +161,14 @@ namespace Inference {
 
         j = 0;
 
-        float32x4_t ss_vec = vdupq_n_f32(ss);
+        const float32x4_t ss_vec = vdupq_n_f32(ss);
 
         for (; j <= size - 4; j += 4) {
-            float32x4_t w_val = vld1q_f32(weight + j);
+            const float32x4_t w_val = vld1q_f32(weight + j);
 
-            float32x4_t x_val = vld1q_f32(x + j);
+            const float32x4_t x_val = vld1q_f32(x + j);
 
-            float32x4_t res = vmulq_f32(w_val, vmulq_f32(ss_vec, x_val));
+            const float32x4_t res = vmulq_f32(w_val, vmulq_f32(ss_vec, x_val));
 
             vst1q_f32(o + j, res);
         }
@@ -247,10 +246,14 @@ namespace Inference {
                 const int offset7 = (i + 7) * n;
 
 #if defined(__ARM_NEON)
-                float32x4_t sum0 = vdupq_n_f32(0.0f); float32x4_t sum1 = vdupq_n_f32(0.0f);
-                float32x4_t sum2 = vdupq_n_f32(0.0f); float32x4_t sum3 = vdupq_n_f32(0.0f);
-                float32x4_t sum4 = vdupq_n_f32(0.0f); float32x4_t sum5 = vdupq_n_f32(0.0f);
-                float32x4_t sum6 = vdupq_n_f32(0.0f); float32x4_t sum7 = vdupq_n_f32(0.0f);
+                float32x4_t sum0 = vdupq_n_f32(0.0f);
+                float32x4_t sum1 = vdupq_n_f32(0.0f);
+                float32x4_t sum2 = vdupq_n_f32(0.0f);
+                float32x4_t sum3 = vdupq_n_f32(0.0f);
+                float32x4_t sum4 = vdupq_n_f32(0.0f);
+                float32x4_t sum5 = vdupq_n_f32(0.0f);
+                float32x4_t sum6 = vdupq_n_f32(0.0f);
+                float32x4_t sum7 = vdupq_n_f32(0.0f);
 
                 for (; j <= n - 4; j += 4) {
                     float32x4_t x_vec = vld1q_f32(x + j);
@@ -264,10 +267,14 @@ namespace Inference {
                     sum6 = vmlaq_f32(sum6, vld1q_f32(w + offset6 + j), x_vec);
                     sum7 = vmlaq_f32(sum7, vld1q_f32(w + offset7 + j), x_vec);
                 }
-                val0 = vaddvq_f32(sum0); val1 = vaddvq_f32(sum1);
-                val2 = vaddvq_f32(sum2); val3 = vaddvq_f32(sum3);
-                val4 = vaddvq_f32(sum4); val5 = vaddvq_f32(sum5);
-                val6 = vaddvq_f32(sum6); val7 = vaddvq_f32(sum7);
+                val0 = vaddvq_f32(sum0);
+                val1 = vaddvq_f32(sum1);
+                val2 = vaddvq_f32(sum2);
+                val3 = vaddvq_f32(sum3);
+                val4 = vaddvq_f32(sum4);
+                val5 = vaddvq_f32(sum5);
+                val6 = vaddvq_f32(sum6);
+                val7 = vaddvq_f32(sum7);
 #elif defined(__AVX2__)
                 __m256 sum0 = _mm256_setzero_ps(); __m256 sum1 = _mm256_setzero_ps();
                 __m256 sum2 = _mm256_setzero_ps(); __m256 sum3 = _mm256_setzero_ps();
@@ -751,7 +758,7 @@ namespace Inference {
         return s->logits.data();
     }
 
-    void FloatTransformer::memory_map_weights(float *ptr, const int shared_weights) {
+    void FloatTransformer::memory_map_weights(const float *ptr, const int shared_weights) {
         const int head_size = config.dim / config.n_heads;
         const unsigned long long n_layers = config.n_layers;
 

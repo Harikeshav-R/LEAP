@@ -56,7 +56,7 @@ namespace Inference {
         std::vector<float> rope_cos;
         std::vector<float> rope_sin;
 
-        void memory_map_weights(float *ptr, int shared_weights);
+        void memory_map_weights(const float *ptr, int shared_weights);
 
         void init_run_state();
 

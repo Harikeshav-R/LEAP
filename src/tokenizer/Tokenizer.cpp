@@ -47,8 +47,7 @@ namespace Tokenizer {
             eos_idx
         );
 
-        auto err = model_->load(model_path);
-        if (err != tokenizers::Error::Ok) {
+        if (auto err = model_->load(model_path); err != tokenizers::Error::Ok) {
             throw std::runtime_error("Failed to load tokenizer model: " + model_path);
         }
 

@@ -154,8 +154,7 @@ namespace Export {
 
         // Padding
         long current_pos = out_file.tellp();
-        long pad = 256 - current_pos;
-        if (pad > 0) {
+        if (long pad = 256 - current_pos; pad > 0) {
             std::vector<char> zeros(pad, 0);
             out_file.write(zeros.data(), pad);
         }
@@ -171,7 +170,7 @@ namespace Export {
         struct QuantResult {
             torch::Tensor q;
             torch::Tensor s;
-            float err;
+            float err{};
         };
 
         // Pipeline: 
@@ -220,8 +219,8 @@ namespace Export {
 
         auto launch_quantize = [&](size_t idx) {
             return std::async(std::launch::async, [=, &weights]() {
-                auto result = quantize_q80(weights[idx], group_size);
-                return QuantResult{std::get < 0 > (result), std::get < 1 > (result), std::get < 2 > (result)};
+                const auto result = quantize_q80(weights[idx], group_size);
+                return QuantResult{std::get<0>(result), std::get<1>(result), std::get<2>(result)};
             });
         };
 
@@ -266,7 +265,7 @@ namespace Export {
         }
 
         if (!errors.empty()) {
-            std::ranges::sort(errors, std::greater<float>());
+            std::ranges::sort(errors, std::greater<>());
             std::cout << "max quantization group error across all weights: " << errors[0] << std::endl;
         }
 

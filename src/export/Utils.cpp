@@ -1,8 +1,5 @@
 #include "Utils.h"
 #include <cmath>
-#include <algorithm>
-#include <cstring>
-#include <iostream>
 
 #if defined(_OPENMP)
 #include <omp.h>
@@ -15,7 +12,7 @@ namespace Export {
         if (t.dtype() != torch::kFloat32) t = t.to(torch::kFloat32);
         if (!t.is_contiguous()) t = t.contiguous();
 
-        const auto data_ptr = t.data_ptr < float > ();
+        const auto data_ptr = t.data_ptr<float>();
         const auto num_bytes = t.numel() * sizeof(float);
         out.write(reinterpret_cast<const char *>(data_ptr), num_bytes);
     }
@@ -24,8 +21,8 @@ namespace Export {
         const auto d = tensor.detach().cpu().to(torch::kInt8);
         // Note: .to(kInt8) handles contiguous implicitly if needed or returns copy
         // But to be safe:
-        auto contig = d.contiguous();
-        const auto data_ptr = contig.data_ptr < int8_t > ();
+        const auto contig = d.contiguous();
+        const auto data_ptr = contig.data_ptr<int8_t>();
         const auto num_bytes = contig.numel() * sizeof(int8_t);
         out.write(reinterpret_cast<const char *>(data_ptr), num_bytes);
     }
@@ -34,7 +31,7 @@ namespace Export {
     // Avoids allocating multiple intermediate tensors
     std::tuple<torch::Tensor, torch::Tensor, float> quantize_q80(const torch::Tensor &w_in, int64_t group_size) {
         // Ensure CPU float32 contiguous
-        torch::Tensor w = w_in.to(torch::kFloat32).contiguous().cpu();
+        const torch::Tensor w = w_in.to(torch::kFloat32).contiguous().cpu();
         const float *w_data = w.data_ptr<float>();
         int64_t numel = w.numel();
 
@@ -44,10 +41,10 @@ namespace Export {
 
         // Output tensors
         auto int8val = torch::empty({numel}, torch::kInt8);
-        int8_t *q_data = int8val.data_ptr<int8_t>();
+        auto *q_data = int8val.data_ptr<int8_t>();
 
         auto scale = torch::empty({num_groups}, torch::kFloat32);
-        float *s_data = scale.data_ptr<float>();
+        auto *s_data = scale.data_ptr<float>();
 
         // Track max error
         float global_max_err = 0.0f;
@@ -61,32 +58,30 @@ namespace Export {
             // 1. Find max absolute value
             float wmax = 0.0f;
             for (int64_t i = 0; i < group_size; ++i) {
-                float val = std::abs(group_w[i]);
-                if (val > wmax) wmax = val;
+                if (const float val = std::abs(group_w[i]); val > wmax) wmax = val;
             }
 
             // 2. Calculate scale
-            float s = wmax / 127.0f;
+            const float s = wmax / 127.0f;
             s_data[g] = s;
 
             // Avoid division by zero
-            float inv_s = (s != 0.0f) ? (1.0f / s) : 0.0f;
+            const float inv_s = (s != 0.0f) ? (1.0f / s) : 0.0f;
 
             // 3. Quantize and Compute Error
             float max_grp_err = 0.0f;
 
             for (int64_t i = 0; i < group_size; ++i) {
-                float val = group_w[i];
-                float q_float = val * inv_s;
+                const float val = group_w[i];
+                const float q_float = val * inv_s;
 
                 // Round to nearest integer
-                int8_t q = static_cast<int8_t>(std::round(q_float));
+                const auto q = static_cast<int8_t>(std::round(q_float));
                 group_q[i] = q;
 
                 // Dequantize to check error
-                float dq = q * s;
-                float err = std::abs(dq - val);
-                if (err > max_grp_err) max_grp_err = err;
+                const float dq = q * s;
+                if (const float err = std::abs(dq - val); err > max_grp_err) max_grp_err = err;
             }
 
             if (max_grp_err > global_max_err) {

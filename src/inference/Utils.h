@@ -28,7 +28,7 @@ namespace Inference {
             return (random_u32(state) >> 8) / 16777216.0f;
         }
 
-        static void safe_print(std::string_view piece) {
+        static void safe_print(const std::string_view piece) {
             if (piece.empty()) {
                 return;
             }

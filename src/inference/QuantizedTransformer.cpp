@@ -1,6 +1,5 @@
 #include "QuantizedTransformer.h"
 #include <cmath>
-#include <cstring>
 #include <unistd.h>
 #include <sys/mman.h>
 #include <stdexcept>
@@ -132,17 +131,17 @@ namespace Inference {
         int i = 0;
         for (; i <= n - 16; i += 16) {
             // Load 16 int8 weights
-            int8x16_t q_raw = vld1q_s8(qx->q + i);
+            const int8x16_t q_raw = vld1q_s8(qx->q + i);
 
             // Expand to 16-bit
-            int16x8_t q_low = vmovl_s8(vget_low_s8(q_raw));
-            int16x8_t q_high = vmovl_s8(vget_high_s8(q_raw));
+            const int16x8_t q_low = vmovl_s8(vget_low_s8(q_raw));
+            const int16x8_t q_high = vmovl_s8(vget_high_s8(q_raw));
 
             // Expand to 32-bit float
-            float32x4_t f0 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(q_low)));
-            float32x4_t f1 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(q_low)));
-            float32x4_t f2 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(q_high)));
-            float32x4_t f3 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(q_high)));
+            const float32x4_t f0 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(q_low)));
+            const float32x4_t f1 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(q_low)));
+            const float32x4_t f2 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(q_high)));
+            const float32x4_t f3 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(q_high)));
 
             // Load scales. Group size is typically >= 32, so 16 elements share the same scale?
             // Wait, group_size can be 32, 64, 128.
@@ -155,11 +154,10 @@ namespace Inference {
             // Optimization: If group_size >> 16, we can hoist scale loading.
             // For safety, we load scale for each block.
 
-            float s_val0 = qx->s[i / group_size];
-            float s_val1 = qx->s[(i + 15) / group_size]; // Check if we cross group boundary
+            const float s_val0 = qx->s[i / group_size];
 
-            if (s_val0 == s_val1) {
-                float32x4_t s_vec = vdupq_n_f32(s_val0);
+            if (const float s_val1 = qx->s[(i + 15) / group_size]; s_val0 == s_val1) {
+                const float32x4_t s_vec = vdupq_n_f32(s_val0);
                 vst1q_f32(x + i, vmulq_f32(f0, s_vec));
                 vst1q_f32(x + i + 4, vmulq_f32(f1, s_vec));
                 vst1q_f32(x + i + 8, vmulq_f32(f2, s_vec));
@@ -217,7 +215,7 @@ namespace Inference {
         float32x4_t sum_vec = vdupq_n_f32(0.0f);
         int j = 0;
         for (; j <= size - 4; j += 4) {
-            float32x4_t val = vld1q_f32(x + j);
+            const float32x4_t val = vld1q_f32(x + j);
             sum_vec = vmlaq_f32(sum_vec, val, val);
         }
         ss = vaddvq_f32(sum_vec);
@@ -252,13 +250,13 @@ namespace Inference {
 
         // Fast Inverse Square Root with Newton-Raphson refinement
 #if defined(__ARM_NEON)
-        float32x4_t ss_v = vdupq_n_f32(ss);
+        const float32x4_t ss_v = vdupq_n_f32(ss);
         float32x4_t rsqrt_est = vrsqrteq_f32(ss_v);
         // Step: y = y * (3 - x * y * y) / 2
         // vrsqrtsq_f32(x, y) returns (3 - x * y) / 2 ... wait, no. 
         // ARM v8 manual: vrsqrts computes (3 - a * b) / 2.
         // So step is: est * vrsqrts(ss, est*est)
-        float32x4_t rsqrt_step = vrsqrtsq_f32(ss_v, vmulq_f32(rsqrt_est, rsqrt_est));
+        const float32x4_t rsqrt_step = vrsqrtsq_f32(ss_v, vmulq_f32(rsqrt_est, rsqrt_est));
         rsqrt_est = vmulq_f32(rsqrt_est, rsqrt_step);
         ss = vgetq_lane_f32(rsqrt_est, 0);
 #elif defined(__AVX2__)
@@ -277,11 +275,11 @@ namespace Inference {
 
 #if defined(__ARM_NEON)
         j = 0;
-        float32x4_t ss_vec = vdupq_n_f32(ss);
+        const float32x4_t ss_vec = vdupq_n_f32(ss);
         for (; j <= size - 4; j += 4) {
-            float32x4_t w_val = vld1q_f32(weight + j);
-            float32x4_t x_val = vld1q_f32(x + j);
-            float32x4_t res = vmulq_f32(w_val, vmulq_f32(ss_vec, x_val));
+            const float32x4_t w_val = vld1q_f32(weight + j);
+            const float32x4_t x_val = vld1q_f32(x + j);
+            const float32x4_t res = vmulq_f32(w_val, vmulq_f32(ss_vec, x_val));
             vst1q_f32(o + j, res);
         }
         for (; j < size; j++) {
@@ -326,8 +324,7 @@ namespace Inference {
             const int current_gs = std::min(gs, n - i);
 
             for (int j = 0; j < current_gs; j++) {
-                const float val = std::abs(x[i + j]);
-                if (val > max_val) max_val = val;
+                if (const float val = std::abs(x[i + j]); val > max_val) max_val = val;
             }
 
             const float scale = max_val / 127.0f;
@@ -426,14 +423,14 @@ namespace Inference {
                 ival3 = vaddvq_s32(sum3);
 
                 for (; k < group_size; k++) {
-                    int8_t qx = x->q[j + k];
+                    const int8_t qx = x->q[j + k];
                     ival0 += static_cast<int32_t>(qx) * static_cast<int32_t>(w->q[in0 + j + k]);
                     ival1 += static_cast<int32_t>(qx) * static_cast<int32_t>(w->q[in1 + j + k]);
                     ival2 += static_cast<int32_t>(qx) * static_cast<int32_t>(w->q[in2 + j + k]);
                     ival3 += static_cast<int32_t>(qx) * static_cast<int32_t>(w->q[in3 + j + k]);
                 }
 
-                float sx = x->s[j / group_size];
+                const float sx = x->s[j / group_size];
                 val0 += static_cast<float>(ival0) * w->s[(in0 + j) / group_size] * sx;
                 val1 += static_cast<float>(ival1) * w->s[(in1 + j) / group_size] * sx;
                 val2 += static_cast<float>(ival2) * w->s[(in2 + j) / group_size] * sx;

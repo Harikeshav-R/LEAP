@@ -29,21 +29,25 @@ namespace Model {
 
         // Reshape xq/xk to [bs, seqlen, n_heads, head_dim/2, 2] and view as complex
         // We use view_as_complex which is a zero-copy cast
-        auto xq_c = torch::view_as_complex(xq.to(torch::kFloat).reshape({xq.size(0), xq.size(1), xq.size(2), -1, 2}));
-        auto xk_c = torch::view_as_complex(xk.to(torch::kFloat).reshape({xk.size(0), xk.size(1), xk.size(2), -1, 2}));
+        const auto xq_c = torch::view_as_complex(xq.to(torch::kFloat).reshape({
+            xq.size(0), xq.size(1), xq.size(2), -1, 2
+        }));
+        const auto xk_c = torch::view_as_complex(xk.to(torch::kFloat).reshape({
+            xk.size(0), xk.size(1), xk.size(2), -1, 2
+        }));
 
         // Reshape freqs_cis for broadcasting: [1, seqlen, 1, head_dim/2]
-        auto freqs = freqs_cis.view({1, xq.size(1), 1, xq.size(3) / 2});
+        const auto freqs = freqs_cis.view({1, xq.size(1), 1, xq.size(3) / 2});
 
         // Perform rotation in complex domain
         // (a + ib) * (c + id) = (ac - bd) + i(ad + bc)
         // This handles the rotation mathematically equivalently to the matrix multiplication
-        auto xq_out_c = xq_c * freqs;
-        auto xk_out_c = xk_c * freqs;
+        const auto xq_out_c = xq_c * freqs;
+        const auto xk_out_c = xk_c * freqs;
 
         // Convert back to real and flatten the last two dimensions
-        auto xq_out = torch::view_as_real(xq_out_c).flatten(3);
-        auto xk_out = torch::view_as_real(xk_out_c).flatten(3);
+        const auto xq_out = torch::view_as_real(xq_out_c).flatten(3);
+        const auto xk_out = torch::view_as_real(xk_out_c).flatten(3);
 
         return {xq_out.type_as(xq), xk_out.type_as(xk)};
     }

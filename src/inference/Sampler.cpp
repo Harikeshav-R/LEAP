@@ -77,10 +77,10 @@ namespace Inference {
 
             int i = 0;
             for (; i <= n - 4; i += 4) {
-                float32x4_t val = vld1q_f32(probabilities + i);
+                const float32x4_t val = vld1q_f32(probabilities + i);
 
                 // Compare val > max_v
-                uint32x4_t mask = vcgtq_f32(val, max_v);
+                const uint32x4_t mask = vcgtq_f32(val, max_v);
 
                 // Update max_v: bsl(mask, val, max_v)
                 max_v = vbslq_f32(mask, val, max_v);
@@ -183,7 +183,7 @@ namespace Inference {
         float sum = 0.0f;
 #pragma omp parallel for simd reduction(+:sum)
         for (int i = 0; i < size; i++) {
-            float val = std::exp(x[i] - max_val);
+            const float val = std::exp(x[i] - max_val);
             x[i] = val;
             sum += val;
         }

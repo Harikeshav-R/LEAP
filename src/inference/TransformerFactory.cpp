@@ -8,7 +8,6 @@
 #include <stdexcept>
 #include <iostream>
 #include <filesystem>
-#include <cmath>
 
 namespace Inference {
     // RAII wrapper for mmap to ensure safety if Transformer constructor throws

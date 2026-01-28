@@ -43,7 +43,7 @@ namespace Model {
         double estimate_mfu(int64_t fwdbwd_per_iter, double dt) const;
 
         torch::Tensor generate(
-            torch::Tensor idx,
+            const torch::Tensor &idx,
             int64_t max_new_tokens,
             double temperature = 1.0,
             std::optional<int64_t> top_k = std::nullopt

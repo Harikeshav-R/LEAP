@@ -23,7 +23,7 @@ namespace Model {
     torch::Tensor TransformerBlockImpl::forward(
         torch::Tensor x,
         const torch::Tensor &freqs_cis,
-        int64_t start_pos,
+        const int64_t start_pos,
         const std::optional<KVCache> &kv_cache
     ) {
         x.add_(attention->forward(attention_norm->forward(x), freqs_cis, start_pos, kv_cache));

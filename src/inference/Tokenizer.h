@@ -12,7 +12,7 @@ namespace Inference {
 
         ~Tokenizer() = default;
 
-        const std::string &decode(int prev_token, int token) const;
+        [[nodiscard]] const std::string &decode(int prev_token, int token) const;
 
         void encode(const std::string &text, bool bos, bool eos, std::vector<int> &tokens, int &n_tokens);
 

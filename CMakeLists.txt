@@ -15,23 +15,23 @@ endif ()
 # Check for LTO/IPO support (Link Time Optimization)
 include(CheckIPOSupported)
 check_ipo_supported(RESULT ipo_supported OUTPUT ipo_output)
-if(ipo_supported)
+if (ipo_supported)
     message(STATUS "IPO / LTO supported. Enabling for Release builds.")
-else()
+else ()
     message(STATUS "IPO / LTO not supported: ${ipo_output}")
-endif()
+endif ()
 
 # Apply aggressive optimizations for Release builds
-if(NOT MSVC)
+if (NOT MSVC)
     # -march=native: Enable all instructions supported by the compiling machine (AVX2, NEON, etc.)
     # -mtune=native: Tune for the compiling machine
     # -ffast-math: Allow aggressive floating point optimizations (breaks strict IEEE compliance, good for AI)
     # -funroll-loops: Aggressive loop unrolling
     # -fomit-frame-pointer: Free up a register
     set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -march=native -mtune=native -ffast-math -funroll-loops -fomit-frame-pointer")
-else()
+else ()
     set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /O2 /arch:AVX2 /fp:fast")
-endif()
+endif ()
 
 # ------------------------------------------------------------------------------
 # 1. Dependency Setup
@@ -173,9 +173,9 @@ foreach (TARGET_NAME ${OMP_TARGETS})
     else ()
         target_link_libraries(${TARGET_NAME} PRIVATE OpenMP::OpenMP_CXX)
     endif ()
-    
+
     # Enable LTO if supported
-    if(ipo_supported)
+    if (ipo_supported)
         set_property(TARGET ${TARGET_NAME} PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
-    endif()
+    endif ()
 endforeach ()

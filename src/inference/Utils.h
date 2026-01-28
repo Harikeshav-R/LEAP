@@ -1,5 +1,5 @@
-#ifndef LEAP_UTILS_H
-#define LEAP_UTILS_H
+#ifndef LEAP_INFERENCE_UTILS_H
+#define LEAP_INFERENCE_UTILS_H
 
 #include <chrono>
 #include <cctype>
@@ -42,4 +42,4 @@ namespace Inference {
     };
 } // namespace Inference
 
-#endif // LEAP_UTILS_H
+#endif // LEAP_INFERENCE_UTILS_H

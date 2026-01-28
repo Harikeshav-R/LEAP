@@ -72,9 +72,16 @@ namespace Model {
         // xq: [B, n_heads, S, D] -> View as [B, n_kv_heads, n_rep, S, D]
         // keys: [B, n_kv_heads, S, D] -> View as [B, n_kv_heads, 1, S, D]
 
+        xq = xq.transpose(1, 2).contiguous();
+        // Current shapes before SDPA:
+        // xq:   [B, n_heads, S_q, D] -> View as [B, n_kv_heads, n_rep, S_q, D]
+        // keys: [B, n_kv_heads, S_kv, D] -> View as [B, n_kv_heads, 1, S_kv, D]
+        //
+        // Note: S_q is the current seqlen, while S_kv (kv_len) may be larger when using KV cache.
+        const auto kv_len = keys.size(2);
         const auto xq_view = xq.view({bsz, n_kv_heads, n_rep, seqlen, head_dim});
-        const auto keys_view = keys.view({bsz, n_kv_heads, 1, seqlen, head_dim});
-        const auto values_view = values.view({bsz, n_kv_heads, 1, seqlen, head_dim});
+        const auto keys_view = keys.contiguous().view({bsz, n_kv_heads, 1, kv_len, head_dim});
+        const auto values_view = values.contiguous().view({bsz, n_kv_heads, 1, kv_len, head_dim});
 
         // Flash Attention / Scaled Dot Product Attention
         // If seqlen > 1, we are in prefill (processing prompt), so we need a causal mask.

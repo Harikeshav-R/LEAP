@@ -31,7 +31,7 @@ namespace Export {
     // Avoids allocating multiple intermediate tensors
     std::tuple<torch::Tensor, torch::Tensor, float> quantize_q80(const torch::Tensor &w_in, int64_t group_size) {
         // Ensure CPU float32 contiguous
-        const torch::Tensor w = w_in.to(torch::kFloat32).contiguous().cpu();
+        const torch::Tensor w = w_in.to(torch::kCPU, torch::kFloat32).contiguous();
         const float *w_data = w.data_ptr<float>();
         int64_t numel = w.numel();
 

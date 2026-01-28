@@ -26,8 +26,11 @@ namespace Model {
         const int64_t start_pos,
         const std::optional<KVCache> &kv_cache
     ) {
-        x.add_(attention->forward(attention_norm->forward(x), freqs_cis, start_pos, kv_cache));
-        x.add_(feed_forward->forward(ffn_norm->forward(x)));
+        // x.add_(attention->forward(attention_norm->forward(x), freqs_cis, start_pos, kv_cache));
+        // x.add_(feed_forward->forward(ffn_norm->forward(x)));
+
+        x = x + attention->forward(attention_norm->forward(x), freqs_cis, start_pos, kv_cache);
+        x = x + feed_forward->forward(ffn_norm->forward(x));
         return x;
     }
 } // namespace Model

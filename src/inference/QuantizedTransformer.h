@@ -67,6 +67,8 @@ namespace Inference {
 
         float *forward(int token, int pos) override;
 
+        void worker_loop() override;
+
     private:
         QuantizedTransformerWeights weights{};
         QuantizedRunState state{};
@@ -84,6 +86,8 @@ namespace Inference {
         void init_run_state();
 
         void precompute_freqs();
+        
+        void run_layer(int l, int pos, float *x);
 
         // Helpers
         std::vector<QuantizedTensor> init_quantized_tensors(void **ptr, int n, int size_each) const;

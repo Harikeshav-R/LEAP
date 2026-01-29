@@ -45,6 +45,8 @@ namespace Inference {
 
         float *forward(int token, int pos) override;
 
+        void worker_loop() override;
+
     private:
         FloatTransformerWeights weights{};
         FloatRunState state{};
@@ -61,6 +63,8 @@ namespace Inference {
         void init_run_state();
 
         void precompute_freqs();
+        
+        void run_layer(int l, int pos, float *x);
 
         static void rmsnorm(float *o, const float *x, const float *weight, int size);
 

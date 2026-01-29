@@ -130,10 +130,13 @@ add_executable(inference
         src/inference/QuantizedTransformer.h
         src/inference/Sampler.cpp
         src/inference/Sampler.h
+        src/inference/TcpTransport.cpp
+        src/inference/TcpTransport.h
         src/inference/Tokenizer.cpp
         src/inference/Tokenizer.h
         src/inference/Transformer.h
         src/inference/TransformerFactory.cpp
+        src/inference/Transport.h
         src/inference/Utils.h
 )
 

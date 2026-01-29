@@ -219,14 +219,14 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
     
     # Define a custom target that invokes the kernel Makefile
     add_custom_target(leap_kmod ALL
-        COMMAND ${MAKE} -C ${CMAKE_CURRENT_SOURCE_DIR}/src/kernel
+        COMMAND make -C ${CMAKE_CURRENT_SOURCE_DIR}/src/kernel
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/src/kernel
         COMMENT "Building LEAP Kernel Module"
     )
     
     # Cleanup logic
     add_custom_target(leap_kmod_clean
-        COMMAND ${MAKE} -C ${CMAKE_CURRENT_SOURCE_DIR}/src/kernel clean
+        COMMAND make -C ${CMAKE_CURRENT_SOURCE_DIR}/src/kernel clean
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/src/kernel
         COMMENT "Cleaning LEAP Kernel Module"
     )

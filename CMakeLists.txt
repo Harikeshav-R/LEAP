@@ -132,6 +132,10 @@ add_executable(inference
         src/inference/Sampler.h
         src/inference/TcpTransport.cpp
         src/inference/TcpTransport.h
+        src/inference/UdpTransport.cpp
+        src/inference/UdpTransport.h
+        src/inference/KernelTransport.cpp
+        src/inference/KernelTransport.h
         src/inference/Tokenizer.cpp
         src/inference/Tokenizer.h
         src/inference/Transformer.h
@@ -205,3 +209,25 @@ foreach (TARGET_NAME ${OMP_TARGETS})
         set_property(TARGET ${TARGET_NAME} PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
     endif ()
 endforeach ()
+
+# ------------------------------------------------------------------------------
+# 5. Linux Kernel Module (Only on Linux)
+# ------------------------------------------------------------------------------
+
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    message(STATUS "Configuring Kernel Module build...")
+    
+    # Define a custom target that invokes the kernel Makefile
+    add_custom_target(leap_kmod ALL
+        COMMAND ${MAKE} -C ${CMAKE_CURRENT_SOURCE_DIR}/src/kernel
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/src/kernel
+        COMMENT "Building LEAP Kernel Module"
+    )
+    
+    # Cleanup logic
+    add_custom_target(leap_kmod_clean
+        COMMAND ${MAKE} -C ${CMAKE_CURRENT_SOURCE_DIR}/src/kernel clean
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/src/kernel
+        COMMENT "Cleaning LEAP Kernel Module"
+    )
+endif ()

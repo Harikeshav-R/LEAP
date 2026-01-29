@@ -31,10 +31,12 @@ namespace Inference {
             if (bind(sockfd, (struct sockaddr *)&dest_addr, sizeof(dest_addr)) < 0) {
                 throw std::runtime_error("Bind failed");
             }
+            std::cout << "UDP Worker listening on port " << port << "..." << std::endl;
         } else {
             if (inet_pton(AF_INET, ip.c_str(), &dest_addr.sin_addr) <= 0) {
                 throw std::runtime_error("Invalid IP");
             }
+            std::cout << "UDP Master ready. Sending to " << ip << ":" << port << std::endl;
         }
     }
 
@@ -87,7 +89,15 @@ namespace Inference {
                                    (struct sockaddr *)&src_addr, &addr_len);
             
             if (len < 0) throw std::runtime_error("UDP recv failed");
-            if (static_cast<size_t>(len) < sizeof(leap_header)) continue; // Too short
+            
+            // If we are a worker (server), remember who sent us data so we can reply
+            if (is_server && dest_addr.sin_addr.s_addr == INADDR_ANY) {
+                dest_addr = src_addr;
+                std::cout << "Worker: Locked onto Master at " << inet_ntoa(src_addr.sin_addr) 
+                          << ":" << ntohs(src_addr.sin_port) << std::endl;
+            }
+
+            if (static_cast<size_t>(len) < sizeof(leap_header)) continue;
 
             auto *hdr = reinterpret_cast<leap_header *>(packet.data());
             if (ntohl(hdr->magic) != LEAP_MAGIC) continue; // Not our packet

@@ -3,6 +3,8 @@
 #include "Sampler.h"
 #include "Utils.h"
 #include "TcpTransport.h"
+#include "UdpTransport.h"
+#include "KernelTransport.h"
 #include <iostream>
 #include <vector>
 #include <string>
@@ -10,6 +12,7 @@
 using namespace Inference;
 
 void read_stdin(const char *guide, std::string &buffer) {
+// ... (rest of file)
     std::cout << guide;
     std::getline(std::cin, buffer);
 }
@@ -262,6 +265,30 @@ int main(int argc, char *argv[]) {
             }
             transport = std::make_unique<TcpTransport>(ip, port, true);
             transport->initialize();
+        } else if (dist_mode_str == "udp") {
+            // UDP Mode (Standard User Space UDP)
+            // Use --dist udp for both Master (client) and Worker (server) logic
+            // But we need to know role. Let's reuse 'master/worker' logic but add transport type arg?
+            // Simpler: --dist master-udp / --dist worker-udp / --dist worker-kernel
+            std::cerr << "Use specific modes: master-udp, worker-udp, worker-kernel" << std::endl;
+            return 1;
+        } else if (dist_mode_str == "master-udp") {
+            dist_mode = DistributedMode::Master;
+            transport = std::make_unique<UdpTransport>(ip, port, false);
+            transport->initialize();
+        } else if (dist_mode_str == "worker-udp") {
+            dist_mode = DistributedMode::Worker;
+            transport = std::make_unique<UdpTransport>(ip, port, true);
+            transport->initialize();
+        } else if (dist_mode_str == "worker-kernel") {
+#ifndef __linux__
+            std::cerr << "Error: --dist worker-kernel is only supported on Linux." << std::endl;
+            return 1;
+#else
+            dist_mode = DistributedMode::Worker;
+            transport = std::make_unique<KernelTransport>(ip); 
+            transport->initialize();
+#endif
         } else if (dist_mode_str != "single") {
              std::cerr << "Unknown distributed mode: " << dist_mode_str << std::endl;
              return 1;

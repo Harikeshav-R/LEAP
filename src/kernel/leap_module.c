@@ -45,20 +45,20 @@ static uint16_t global_seq_id = 0;
 static struct nf_hook_ops leap_nf_ops;
 
 // Function Prototypes
-static int dev_open(struct inode *, struct file *);
-static int dev_release(struct inode *, struct file *);
-static ssize_t dev_write(struct file *, const char __user *, size_t, loff_t *);
-static long dev_ioctl(struct file *, unsigned int, unsigned long);
-static int dev_mmap(struct file *, struct vm_area_struct *);
+static int leap_dev_open(struct inode *, struct file *);
+static int leap_dev_release(struct inode *, struct file *);
+static ssize_t leap_dev_write(struct file *, const char __user *, size_t, loff_t *);
+static long leap_dev_ioctl(struct file *, unsigned int, unsigned long);
+static int leap_dev_mmap(struct file *, struct vm_area_struct *);
 static unsigned int leap_nf_hook(void *priv, struct sk_buff *skb, const struct nf_hook_state *state);
 
 static struct file_operations fops = {
     .owner = THIS_MODULE,
-    .open = dev_open,
-    .release = dev_release,
-    .write = dev_write,
-    .unlocked_ioctl = dev_ioctl,
-    .mmap = dev_mmap,
+    .open = leap_dev_open,
+    .release = leap_dev_release,
+    .write = leap_dev_write,
+    .unlocked_ioctl = leap_dev_ioctl,
+    .mmap = leap_dev_mmap,
 };
 
 // --- Helper: Send UDP Chunk ---
@@ -142,16 +142,16 @@ static unsigned int leap_nf_hook(void *priv, struct sk_buff *skb, const struct n
 
 // --- File Operations ---
 
-static int dev_open(struct inode *inodep, struct file *filep) {
+static int leap_dev_open(struct inode *inodep, struct file *filep) {
     return 0;
 }
 
-static int dev_release(struct inode *inodep, struct file *filep) {
+static int leap_dev_release(struct inode *inodep, struct file *filep) {
     return 0;
 }
 
 // Write: Userspace writes a full tensor buffer here. We fragment and send.
-static ssize_t dev_write(struct file *filep, const char __user *buffer, size_t len, loff_t *offset) {
+static ssize_t leap_dev_write(struct file *filep, const char __user *buffer, size_t len, loff_t *offset) {
     size_t processed = 0;
     uint8_t total_chunks = (len + LEAP_CHUNK_SIZE - 1) / LEAP_CHUNK_SIZE;
     uint8_t chunk_idx = 0;
@@ -188,7 +188,7 @@ static ssize_t dev_write(struct file *filep, const char __user *buffer, size_t l
     return len;
 }
 
-static long dev_ioctl(struct file *filep, unsigned int cmd, unsigned long arg) {
+static long leap_dev_ioctl(struct file *filep, unsigned int cmd, unsigned long arg) {
     if (cmd == LEAP_IOCTL_WAIT_DATA) {
         // Blocking wait until data_ready is non-zero
         if (wait_event_interruptible(leap_wait_queue, atomic_read(&data_ready) != 0)) {
@@ -211,7 +211,7 @@ static long dev_ioctl(struct file *filep, unsigned int cmd, unsigned long arg) {
     return -EINVAL;
 }
 
-static int dev_mmap(struct file *filp, struct vm_area_struct *vma) {
+static int leap_dev_mmap(struct file *filp, struct vm_area_struct *vma) {
     unsigned long pfn;
     unsigned long size = vma->vm_end - vma->vm_start;
 

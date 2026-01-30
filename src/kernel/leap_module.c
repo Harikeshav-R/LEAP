@@ -92,6 +92,9 @@ static int send_udp_chunk(void *data, size_t len, uint16_t seq, uint8_t chunk, u
     vec[1].iov_base = data;
     vec[1].iov_len = len;
 
+    // Log TX attempt
+    printk(KERN_INFO "LEAP: Sending %lu bytes to %pI4:%d (seq %d)\n", len, &dest_addr.sin_addr.s_addr, ntohs(dest_addr.sin_port), seq);
+
     // Kernel Send
     ret = kernel_sendmsg(tx_socket, &msg, vec, 2, sizeof(hdr) + len);
     if (ret < 0) {

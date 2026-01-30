@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.28)
 project(LEAP)
 
+option(BUILD_KERNEL_MODULE "Build the LEAP Linux Kernel Module" OFF)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -130,10 +132,17 @@ add_executable(inference
         src/inference/QuantizedTransformer.h
         src/inference/Sampler.cpp
         src/inference/Sampler.h
+        src/inference/TcpTransport.cpp
+        src/inference/TcpTransport.h
+        src/inference/UdpTransport.cpp
+        src/inference/UdpTransport.h
+        src/inference/KernelTransport.cpp
+        src/inference/KernelTransport.h
         src/inference/Tokenizer.cpp
         src/inference/Tokenizer.h
         src/inference/Transformer.h
         src/inference/TransformerFactory.cpp
+        src/inference/Transport.h
         src/inference/Utils.h
 )
 
@@ -202,3 +211,25 @@ foreach (TARGET_NAME ${OMP_TARGETS})
         set_property(TARGET ${TARGET_NAME} PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
     endif ()
 endforeach ()
+
+# ------------------------------------------------------------------------------
+# 5. Linux Kernel Module (Only on Linux)
+# ------------------------------------------------------------------------------
+
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND BUILD_KERNEL_MODULE)
+    message(STATUS "Configuring Kernel Module build...")
+    
+    # Define a custom target that invokes the kernel Makefile
+    add_custom_target(leap_kmod ALL
+        COMMAND make -C ${CMAKE_CURRENT_SOURCE_DIR}/src/kernel
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/src/kernel
+        COMMENT "Building LEAP Kernel Module"
+    )
+    
+    # Cleanup logic
+    add_custom_target(leap_kmod_clean
+        COMMAND make -C ${CMAKE_CURRENT_SOURCE_DIR}/src/kernel clean
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/src/kernel
+        COMMENT "Cleaning LEAP Kernel Module"
+    )
+endif ()

@@ -6,6 +6,7 @@
 #include <iostream>
 #include <vector>
 #include <algorithm>
+#include <cstring>
 
 #if defined(__ARM_NEON)
 #include <arm_neon.h>
@@ -435,7 +436,7 @@ namespace Inference {
                 val1 += static_cast<float>(ival1) * w->s[(in1 + j) / group_size] * sx;
                 val2 += static_cast<float>(ival2) * w->s[(in2 + j) / group_size] * sx;
                 val3 += static_cast<float>(ival3) * w->s[(in3 + j) / group_size] * sx;
-                                }
+                }
 #elif defined(__AVX2__)
                 for (int j = 0; j <= n - group_size; j += group_size) {
                     // Accumulators for 4 outputs
@@ -585,7 +586,7 @@ namespace Inference {
                         ival += static_cast<int32_t>(x->q[j + k_idx]) * static_cast<int32_t>(w->q[in + j + k_idx]);
                     }
                     val += static_cast<float>(ival) * w->s[(in + j) / group_size] * x->s[j / group_size];
-                                                                }
+                    }
 #elif defined(__AVX2__)
                     for (int j = 0; j <= n - group_size; j += group_size) {
                         __m256i sum = _mm256_setzero_si256();
@@ -633,299 +634,328 @@ namespace Inference {
         }
     }
 
-    float *QuantizedTransformer::forward(const int token, const int pos) {
+    void QuantizedTransformer::run_layer(int l, int pos, float *x) {
         const Config *p = &config;
         const QuantizedTransformerWeights *w = &weights;
         QuantizedRunState *s = &state;
-        float *x = s->x.data();
         const int dim = p->dim;
         const int kv_dim = (p->dim * p->n_kv_heads) / p->n_heads;
         const int kv_mul = p->n_heads / p->n_kv_heads;
         const int hidden_dim = p->hidden_dim;
         const int head_size = dim / p->n_heads;
 
-        std::copy_n(w->token_embedding_table.data() + token * dim, dim, x);
+        rmsnorm(s->xb.data(), x, w->rms_att_weight + l * dim, dim);
 
-        for (int l = 0; l < p->n_layers; l++) {
-            rmsnorm(s->xb.data(), x, w->rms_att_weight + l * dim, dim);
+        // Construct temp QuantizedTensor for xq
+        QuantizedTensor xq_tensor{s->xq_q.data(), s->xq_s.data()};
+        quantize(&xq_tensor, s->xb.data(), dim);
 
-            // Construct temp QuantizedTensor for xq
-            QuantizedTensor xq_tensor{s->xq_q.data(), s->xq_s.data()};
-            quantize(&xq_tensor, s->xb.data(), dim);
+        // Calculate pointers to the KV cache for this layer and position
+        const int loff = l * p->seq_len * kv_dim;
+        float *k_cache_ptr = s->key_cache.data() + loff + pos * kv_dim;
+        float *v_cache_ptr = s->value_cache.data() + loff + pos * kv_dim;
 
-            // Calculate pointers to the KV cache for this layer and position
-            const int loff = l * p->seq_len * kv_dim;
-            float *k_cache_ptr = s->key_cache.data() + loff + pos * kv_dim;
-            float *v_cache_ptr = s->value_cache.data() + loff + pos * kv_dim;
+        // Compute Q, K, V
+        matmul(s->q.data(), &xq_tensor, &w->wq[l], dim, dim);
+        matmul(k_cache_ptr, &xq_tensor, &w->wk[l], dim, kv_dim);
+        matmul(v_cache_ptr, &xq_tensor, &w->wv[l], dim, kv_dim);
 
-            // Compute Q, K, V
-            // Write K and V directly to cache, avoiding intermediate s->k, s->v and copy
-            matmul(s->q.data(), &xq_tensor, &w->wq[l], dim, dim);
-            matmul(k_cache_ptr, &xq_tensor, &w->wk[l], dim, kv_dim);
-            matmul(v_cache_ptr, &xq_tensor, &w->wv[l], dim, kv_dim);
-
-            // RoPE
-            const int rope_offset = pos * (head_size / 2);
-            for (int i = 0; i < p->n_heads; i++) {
-                int j = 0;
+        // RoPE
+        const int rope_offset = pos * (head_size / 2);
+        for (int i = 0; i < p->n_heads; i++) {
+            int j = 0;
 #if defined(__ARM_NEON)
-                for (; j <= head_size - 4; j += 4) {
-                    float32x4_t q_vec = vld1q_f32(s->q.data() + i * head_size + j);
+            for (; j <= head_size - 4; j += 4) {
+                float32x4_t q_vec = vld1q_f32(s->q.data() + i * head_size + j);
 
-                    float c0 = rope_cos[rope_offset + j / 2];
-                    float c1 = rope_cos[rope_offset + j / 2 + 1];
-                    float s0 = rope_sin[rope_offset + j / 2];
-                    float s1 = rope_sin[rope_offset + j / 2 + 1];
+                float c0 = rope_cos[rope_offset + j / 2];
+                float c1 = rope_cos[rope_offset + j / 2 + 1];
+                float s0 = rope_sin[rope_offset + j / 2];
+                float s1 = rope_sin[rope_offset + j / 2 + 1];
 
-                    float32x4_t c_vec = {c0, c0, c1, c1};
-                    float32x4_t s_signed = {-s0, s0, -s1, s1};
+                float32x4_t c_vec = {c0, c0, c1, c1};
+                float32x4_t s_signed = {-s0, s0, -s1, s1};
 
-                    float32x4_t term1 = vmulq_f32(q_vec, c_vec);
-                    float32x4_t q_swap = vrev64q_f32(q_vec);
-                    float32x4_t term2 = vmulq_f32(q_swap, s_signed);
-                    float32x4_t res = vaddq_f32(term1, term2);
-                    vst1q_f32(s->q.data() + i * head_size + j, res);
+                float32x4_t term1 = vmulq_f32(q_vec, c_vec);
+                float32x4_t q_swap = vrev64q_f32(q_vec);
+                float32x4_t term2 = vmulq_f32(q_swap, s_signed);
+                float32x4_t res = vaddq_f32(term1, term2);
+                vst1q_f32(s->q.data() + i * head_size + j, res);
 
-                    if (i < p->n_kv_heads) {
-                        float32x4_t k_vec = vld1q_f32(k_cache_ptr + i * head_size + j);
-                        float32x4_t k_term1 = vmulq_f32(k_vec, c_vec);
-                        float32x4_t k_swap = vrev64q_f32(k_vec);
-                        float32x4_t k_term2 = vmulq_f32(k_swap, s_signed);
-                        float32x4_t k_res = vaddq_f32(k_term1, k_term2);
-                        vst1q_f32(k_cache_ptr + i * head_size + j, k_res);
-                    }
-                }
-#elif defined(__AVX2__)
-                for (; j <= head_size - 8; j += 8) {
-                    __m256 q_vec = _mm256_loadu_ps(s->q.data() + i * head_size + j);
-
-                    __m128 c_small = _mm_loadu_ps(&rope_cos[rope_offset + j / 2]);
-                    __m128 s_small = _mm_loadu_ps(&rope_sin[rope_offset + j / 2]);
-
-                    __m128 c_lo = _mm_unpacklo_ps(c_small, c_small);
-                    __m128 c_hi = _mm_unpackhi_ps(c_small, c_small);
-                    __m256 c_vec = _mm256_insertf128_ps(_mm256_castps128_ps256(c_lo), c_hi, 1);
-
-                    __m128 s_lo = _mm_unpacklo_ps(s_small, s_small);
-                    __m128 s_hi = _mm_unpackhi_ps(s_small, s_small);
-                    __m256 s_vec = _mm256_insertf128_ps(_mm256_castps128_ps256(s_lo), s_hi, 1);
-
-                    __m256 q_swap = _mm256_permute_ps(q_vec, _MM_SHUFFLE(2, 3, 0, 1));
-
-                    __m256 term1 = _mm256_mul_ps(q_vec, c_vec);
-                    __m256 term2 = _mm256_mul_ps(q_swap, s_vec);
-                    __m256 res = _mm256_addsub_ps(term1, term2);
-
-                    _mm256_storeu_ps(s->q.data() + i * head_size + j, res);
-
-                    if (i < p->n_kv_heads) {
-                        __m256 k_vec = _mm256_loadu_ps(k_cache_ptr + i * head_size + j);
-                        __m256 k_swap = _mm256_permute_ps(k_vec, _MM_SHUFFLE(2, 3, 0, 1));
-                        __m256 k_t1 = _mm256_mul_ps(k_vec, c_vec);
-                        __m256 k_t2 = _mm256_mul_ps(k_swap, s_vec);
-                        __m256 k_res = _mm256_addsub_ps(k_t1, k_t2);
-                        _mm256_storeu_ps(k_cache_ptr + i * head_size + j, k_res);
-                    }
-                }
-#endif
-                for (; j < head_size; j += 2) {
-                    const float fcr = rope_cos[rope_offset + j / 2];
-                    const float fci = rope_sin[rope_offset + j / 2];
-
-                    const float q0 = s->q[i * head_size + j];
-                    const float q1 = s->q[i * head_size + j + 1];
-                    s->q[i * head_size + j] = q0 * fcr - q1 * fci;
-                    s->q[i * head_size + j + 1] = q0 * fci + q1 * fcr;
-
-                    if (i < p->n_kv_heads) {
-                        const float k0 = k_cache_ptr[i * head_size + j];
-                        const float k1 = k_cache_ptr[i * head_size + j + 1];
-                        k_cache_ptr[i * head_size + j] = k0 * fcr - k1 * fci;
-                        k_cache_ptr[i * head_size + j + 1] = k0 * fci + k1 * fcr;
-                    }
+                if (i < p->n_kv_heads) {
+                    float32x4_t k_vec = vld1q_f32(k_cache_ptr + i * head_size + j);
+                    float32x4_t k_term1 = vmulq_f32(k_vec, c_vec);
+                    float32x4_t k_swap = vrev64q_f32(k_vec);
+                    float32x4_t k_term2 = vmulq_f32(k_swap, s_signed);
+                    float32x4_t k_res = vaddq_f32(k_term1, k_term2);
+                    vst1q_f32(k_cache_ptr + i * head_size + j, k_res);
                 }
             }
+#elif defined(__AVX2__)
+            for (; j <= head_size - 8; j += 8) {
+                __m256 q_vec = _mm256_loadu_ps(s->q.data() + i * head_size + j);
 
-            int h;
+                __m128 c_small = _mm_loadu_ps(&rope_cos[rope_offset + j / 2]);
+                __m128 s_small = _mm_loadu_ps(&rope_sin[rope_offset + j / 2]);
+
+                __m128 c_lo = _mm_unpacklo_ps(c_small, c_small);
+                __m128 c_hi = _mm_unpackhi_ps(c_small, c_small);
+                __m256 c_vec = _mm256_insertf128_ps(_mm256_castps128_ps256(c_lo), c_hi, 1);
+
+                __m128 s_lo = _mm_unpacklo_ps(s_small, s_small);
+                __m128 s_hi = _mm_unpackhi_ps(s_small, s_small);
+                __m256 s_vec = _mm256_insertf128_ps(_mm256_castps128_ps256(s_lo), s_hi, 1);
+
+                __m256 q_swap = _mm256_permute_ps(q_vec, _MM_SHUFFLE(2, 3, 0, 1));
+
+                __m256 term1 = _mm256_mul_ps(q_vec, c_vec);
+                __m256 term2 = _mm256_mul_ps(q_swap, s_vec);
+                __m256 res = _mm256_addsub_ps(term1, term2);
+
+                _mm256_storeu_ps(s->q.data() + i * head_size + j, res);
+
+                if (i < p->n_kv_heads) {
+                    __m256 k_vec = _mm256_loadu_ps(k_cache_ptr + i * head_size + j);
+                    __m256 k_swap = _mm256_permute_ps(k_vec, _MM_SHUFFLE(2, 3, 0, 1));
+                    __m256 k_t1 = _mm256_mul_ps(k_vec, c_vec);
+                    __m256 k_t2 = _mm256_mul_ps(k_swap, s_vec);
+                    __m256 k_res = _mm256_addsub_ps(k_t1, k_t2);
+                    _mm256_storeu_ps(k_cache_ptr + i * head_size + j, k_res);
+                }
+            }
+#endif
+            for (; j < head_size; j += 2) {
+                const float fcr = rope_cos[rope_offset + j / 2];
+                const float fci = rope_sin[rope_offset + j / 2];
+
+                const float q0 = s->q[i * head_size + j];
+                const float q1 = s->q[i * head_size + j + 1];
+                s->q[i * head_size + j] = q0 * fcr - q1 * fci;
+                s->q[i * head_size + j + 1] = q0 * fci + q1 * fcr;
+
+                if (i < p->n_kv_heads) {
+                    const float k0 = k_cache_ptr[i * head_size + j];
+                    const float k1 = k_cache_ptr[i * head_size + j + 1];
+                    k_cache_ptr[i * head_size + j] = k0 * fcr - k1 * fci;
+                    k_cache_ptr[i * head_size + j + 1] = k0 * fci + k1 * fcr;
+                }
+            }
+        }
+
+        int h;
 #pragma omp parallel for private(h)
-            for (h = 0; h < p->n_heads; h++) {
-                const float *q = s->q.data() + h * head_size;
-                float *att = s->att.data() + h * p->seq_len;
-                int t = 0;
+        for (h = 0; h < p->n_heads; h++) {
+            const float *q = s->q.data() + h * head_size;
+            float *att = s->att.data() + h * p->seq_len;
+            int t = 0;
 
-                for (; t <= pos - 4; t += 4) {
-                    const float *k0 = s->key_cache.data() + loff + t * kv_dim + (h / kv_mul) * head_size;
-                    const float *k1 = s->key_cache.data() + loff + (t + 1) * kv_dim + (h / kv_mul) * head_size;
-                    const float *k2 = s->key_cache.data() + loff + (t + 2) * kv_dim + (h / kv_mul) * head_size;
-                    const float *k3 = s->key_cache.data() + loff + (t + 3) * kv_dim + (h / kv_mul) * head_size;
+            for (; t <= pos - 4; t += 4) {
+                const float *k0 = s->key_cache.data() + loff + t * kv_dim + (h / kv_mul) * head_size;
+                const float *k1 = s->key_cache.data() + loff + (t + 1) * kv_dim + (h / kv_mul) * head_size;
+                const float *k2 = s->key_cache.data() + loff + (t + 2) * kv_dim + (h / kv_mul) * head_size;
+                const float *k3 = s->key_cache.data() + loff + (t + 3) * kv_dim + (h / kv_mul) * head_size;
 
-                    float s0 = 0.0f;
-                    float s1 = 0.0f;
-                    float s2 = 0.0f;
-                    float s3 = 0.0f;
-                    int i = 0;
+                float s0 = 0.0f;
+                float s1 = 0.0f;
+                float s2 = 0.0f;
+                float s3 = 0.0f;
+                int i = 0;
 
 #if defined(__AVX2__)
-                    __m256 sum0 = _mm256_setzero_ps();
-                    __m256 sum1 = _mm256_setzero_ps();
-                    __m256 sum2 = _mm256_setzero_ps();
-                    __m256 sum3 = _mm256_setzero_ps();
+                __m256 sum0 = _mm256_setzero_ps();
+                __m256 sum1 = _mm256_setzero_ps();
+                __m256 sum2 = _mm256_setzero_ps();
+                __m256 sum3 = _mm256_setzero_ps();
 
-                    for (; i <= head_size - 8; i += 8) {
-                        __m256 q_vec = _mm256_loadu_ps(q + i);
-                        __m256 k0_vec = _mm256_loadu_ps(k0 + i);
-                        __m256 k1_vec = _mm256_loadu_ps(k1 + i);
-                        __m256 k2_vec = _mm256_loadu_ps(k2 + i);
-                        __m256 k3_vec = _mm256_loadu_ps(k3 + i);
+                for (; i <= head_size - 8; i += 8) {
+                    __m256 q_vec = _mm256_loadu_ps(q + i);
+                    __m256 k0_vec = _mm256_loadu_ps(k0 + i);
+                    __m256 k1_vec = _mm256_loadu_ps(k1 + i);
+                    __m256 k2_vec = _mm256_loadu_ps(k2 + i);
+                    __m256 k3_vec = _mm256_loadu_ps(k3 + i);
 
-                        sum0 = _mm256_fmadd_ps(q_vec, k0_vec, sum0);
-                        sum1 = _mm256_fmadd_ps(q_vec, k1_vec, sum1);
-                        sum2 = _mm256_fmadd_ps(q_vec, k2_vec, sum2);
-                        sum3 = _mm256_fmadd_ps(q_vec, k3_vec, sum3);
-                    }
+                    sum0 = _mm256_fmadd_ps(q_vec, k0_vec, sum0);
+                    sum1 = _mm256_fmadd_ps(q_vec, k1_vec, sum1);
+                    sum2 = _mm256_fmadd_ps(q_vec, k2_vec, sum2);
+                    sum3 = _mm256_fmadd_ps(q_vec, k3_vec, sum3);
+                }
 
-                    auto hsum = [](__m256 v) {
-                        __m128 lo = _mm256_castps256_ps128(v);
-                        __m128 hi = _mm256_extractf128_ps(v, 1);
-                        lo = _mm_add_ps(lo, hi);
-                        lo = _mm_hadd_ps(lo, lo);
-                        return _mm_cvtss_f32(_mm_hadd_ps(lo, lo));
-                    };
-                    s0 = hsum(sum0);
-                    s1 = hsum(sum1);
-                    s2 = hsum(sum2);
-                    s3 = hsum(sum3);
+                auto hsum = [](__m256 v) {
+                    __m128 lo = _mm256_castps256_ps128(v);
+                    __m128 hi = _mm256_extractf128_ps(v, 1);
+                    lo = _mm_add_ps(lo, hi);
+                    lo = _mm_hadd_ps(lo, lo);
+                    return _mm_cvtss_f32(_mm_hadd_ps(lo, lo));
+                };
+                s0 = hsum(sum0);
+                s1 = hsum(sum1);
+                s2 = hsum(sum2);
+                s3 = hsum(sum3);
 #elif defined(__ARM_NEON)
-                    float32x4_t sum0_v = vdupq_n_f32(0.0f);
-                    float32x4_t sum1_v = vdupq_n_f32(0.0f);
-                    float32x4_t sum2_v = vdupq_n_f32(0.0f);
-                    float32x4_t sum3_v = vdupq_n_f32(0.0f);
+                float32x4_t sum0_v = vdupq_n_f32(0.0f);
+                float32x4_t sum1_v = vdupq_n_f32(0.0f);
+                float32x4_t sum2_v = vdupq_n_f32(0.0f);
+                float32x4_t sum3_v = vdupq_n_f32(0.0f);
 
-                    for (; i <= head_size - 4; i += 4) {
-                        float32x4_t q_vec = vld1q_f32(q + i);
-                        float32x4_t k0_vec = vld1q_f32(k0 + i);
-                        float32x4_t k1_vec = vld1q_f32(k1 + i);
-                        float32x4_t k2_vec = vld1q_f32(k2 + i);
-                        float32x4_t k3_vec = vld1q_f32(k3 + i);
+                for (; i <= head_size - 4; i += 4) {
+                    float32x4_t q_vec = vld1q_f32(q + i);
+                    float32x4_t k0_vec = vld1q_f32(k0 + i);
+                    float32x4_t k1_vec = vld1q_f32(k1 + i);
+                    float32x4_t k2_vec = vld1q_f32(k2 + i);
+                    float32x4_t k3_vec = vld1q_f32(k3 + i);
 
-                        sum0_v = vmlaq_f32(sum0_v, q_vec, k0_vec);
-                        sum1_v = vmlaq_f32(sum1_v, q_vec, k1_vec);
-                        sum2_v = vmlaq_f32(sum2_v, q_vec, k2_vec);
-                        sum3_v = vmlaq_f32(sum3_v, q_vec, k3_vec);
-                    }
-                    s0 = vaddvq_f32(sum0_v);
-                    s1 = vaddvq_f32(sum1_v);
-                    s2 = vaddvq_f32(sum2_v);
-                    s3 = vaddvq_f32(sum3_v);
-#endif
-                    for (; i < head_size; i++) {
-                        float qv = q[i];
-                        s0 += qv * k0[i];
-                        s1 += qv * k1[i];
-                        s2 += qv * k2[i];
-                        s3 += qv * k3[i];
-                    }
-                    float scale = 1.0f / std::sqrt(static_cast<float>(head_size));
-                    att[t] = s0 * scale;
-                    att[t + 1] = s1 * scale;
-                    att[t + 2] = s2 * scale;
-                    att[t + 3] = s3 * scale;
+                    sum0_v = vmlaq_f32(sum0_v, q_vec, k0_vec);
+                    sum1_v = vmlaq_f32(sum1_v, q_vec, k1_vec);
+                    sum2_v = vmlaq_f32(sum2_v, q_vec, k2_vec);
+                    sum3_v = vmlaq_f32(sum3_v, q_vec, k3_vec);
                 }
-
-                for (; t <= pos; t++) {
-                    const float *k = s->key_cache.data() + loff + t * kv_dim + (h / kv_mul) * head_size;
-
-                    float score = 0.0f;
-                    int i = 0;
-#if defined(__ARM_NEON)
-                    float32x4_t sum_vec = vdupq_n_f32(0.0f);
-                    for (; i <= head_size - 4; i += 4) {
-                        float32x4_t q_vec = vld1q_f32(q + i);
-                        float32x4_t k_vec = vld1q_f32(k + i); // Corrected pointer from k_ptr to k
-                        sum_vec = vmlaq_f32(sum_vec, q_vec, k_vec);
-                    }
-                    score = vaddvq_f32(sum_vec);
-#elif defined(__AVX2__)
-                    __m256 sum_vec = _mm256_setzero_ps();
-                    for (; i <= head_size - 8; i += 8) {
-                        __m256 q_vec = _mm256_loadu_ps(q + i);
-                        __m256 k_vec = _mm256_loadu_ps(k + i);
-                        sum_vec = _mm256_fmadd_ps(q_vec, k_vec, sum_vec);
-                    }
-                    __m128 sum_high = _mm256_extractf128_ps(sum_vec, 1);
-                    __m128 sum_low = _mm256_castps256_ps128(sum_vec);
-                    __m128 sum128 = _mm_add_ps(sum_low, sum_high);
-                    sum128 = _mm_hadd_ps(sum128, sum128);
-                    sum128 = _mm_hadd_ps(sum128, sum128);
-                    score = _mm_cvtss_f32(sum128);
+                s0 = vaddvq_f32(sum0_v);
+                s1 = vaddvq_f32(sum1_v);
+                s2 = vaddvq_f32(sum2_v);
+                s3 = vaddvq_f32(sum3_v);
 #endif
-                    for (; i < head_size; i++) {
-                        score += q[i] * k[i];
-                    }
-                    score /= std::sqrt(static_cast<float>(head_size));
-                    att[t] = score;
+                for (; i < head_size; i++) {
+                    float qv = q[i];
+                    s0 += qv * k0[i];
+                    s1 += qv * k1[i];
+                    s2 += qv * k2[i];
+                    s3 += qv * k3[i];
                 }
-
-                softmax(att, pos + 1);
-
-                float *xb = s->xb.data() + h * head_size;
-                std::fill_n(xb, head_size, 0.0f);
-
-                for (int t = 0; t <= pos; t++) {
-                    const float *v = s->value_cache.data() + loff + t * kv_dim + (h / kv_mul) * head_size;
-                    const float a = att[t];
-                    int i = 0;
-#if defined(__ARM_NEON)
-                    float32x4_t a_vec = vdupq_n_f32(a);
-                    for (; i <= head_size - 4; i += 4) {
-                        float32x4_t xb_vec = vld1q_f32(xb + i);
-                        float32x4_t v_vec = vld1q_f32(v + i); // Corrected pointer from v_ptr to v
-                        xb_vec = vmlaq_f32(xb_vec, a_vec, v_vec);
-                        vst1q_f32(xb + i, xb_vec);
-                    }
-#elif defined(__AVX2__)
-                    __m256 a_vec = _mm256_set1_ps(a);
-                    for (; i <= head_size - 8; i += 8) {
-                        __m256 xb_vec = _mm256_loadu_ps(xb + i);
-                        __m256 v_vec = _mm256_loadu_ps(v + i);
-                        xb_vec = _mm256_fmadd_ps(a_vec, v_vec, xb_vec);
-                        _mm256_storeu_ps(xb + i, xb_vec);
-                    }
-#endif
-                    for (; i < head_size; i++) {
-                        xb[i] += a * v[i];
-                    }
-                }
+                float scale = 1.0f / std::sqrt(static_cast<float>(head_size));
+                att[t] = s0 * scale;
+                att[t + 1] = s1 * scale;
+                att[t + 2] = s2 * scale;
+                att[t + 3] = s3 * scale;
             }
 
-            quantize(&xq_tensor, s->xb.data(), dim);
-            matmul(s->xb2.data(), &xq_tensor, &w->wo[l], dim, dim);
+            for (; t <= pos; t++) {
+                const float *k = s->key_cache.data() + loff + t * kv_dim + (h / kv_mul) * head_size;
 
-            for (int i = 0; i < dim; i++) {
-                x[i] += s->xb2[i];
+                float score = 0.0f;
+                int i = 0;
+#if defined(__ARM_NEON)
+                float32x4_t sum_vec = vdupq_n_f32(0.0f);
+                for (; i <= head_size - 4; i += 4) {
+                    float32x4_t q_vec = vld1q_f32(q + i);
+                    float32x4_t k_vec = vld1q_f32(k + i);
+                    sum_vec = vmlaq_f32(sum_vec, q_vec, k_vec);
+                }
+                score = vaddvq_f32(sum_vec);
+#elif defined(__AVX2__)
+                __m256 sum_vec = _mm256_setzero_ps();
+                for (; i <= head_size - 8; i += 8) {
+                    __m256 q_vec = _mm256_loadu_ps(q + i);
+                    __m256 k_vec = _mm256_loadu_ps(k + i);
+                    sum_vec = _mm256_fmadd_ps(q_vec, k_vec, sum_vec);
+                }
+                __m128 sum_high = _mm256_extractf128_ps(sum_vec, 1);
+                __m128 sum_low = _mm256_castps256_ps128(sum_vec);
+                __m128 sum128 = _mm_add_ps(sum_low, sum_high);
+                sum128 = _mm_hadd_ps(sum128, sum128);
+                sum128 = _mm_hadd_ps(sum128, sum128);
+                score = _mm_cvtss_f32(sum128);
+#endif
+                for (; i < head_size; i++) {
+                    score += q[i] * k[i];
+                }
+                score /= std::sqrt(static_cast<float>(head_size));
+                att[t] = score;
             }
 
-            rmsnorm(s->xb.data(), x, w->rms_ffn_weight + l * dim, dim);
+            softmax(att, pos + 1);
 
-            quantize(&xq_tensor, s->xb.data(), dim);
-            matmul(s->hb.data(), &xq_tensor, &w->w1[l], dim, hidden_dim);
-            matmul(s->hb2.data(), &xq_tensor, &w->w3[l], dim, hidden_dim);
+            float *xb = s->xb.data() + h * head_size;
+            std::fill_n(xb, head_size, 0.0f);
+
+            for (int t = 0; t <= pos; t++) {
+                const float *v = s->value_cache.data() + loff + t * kv_dim + (h / kv_mul) * head_size;
+                const float a = att[t];
+                int i = 0;
+#if defined(__ARM_NEON)
+                float32x4_t a_vec = vdupq_n_f32(a);
+                for (; i <= head_size - 4; i += 4) {
+                    float32x4_t xb_vec = vld1q_f32(xb + i);
+                    float32x4_t v_vec = vld1q_f32(v + i);
+                    xb_vec = vmlaq_f32(xb_vec, a_vec, v_vec);
+                    vst1q_f32(xb + i, xb_vec);
+                }
+#elif defined(__AVX2__)
+                __m256 a_vec = _mm256_set1_ps(a);
+                for (; i <= head_size - 8; i += 8) {
+                    __m256 xb_vec = _mm256_loadu_ps(xb + i);
+                    __m256 v_vec = _mm256_loadu_ps(v + i);
+                    xb_vec = _mm256_fmadd_ps(a_vec, v_vec, xb_vec);
+                    _mm256_storeu_ps(xb + i, xb_vec);
+                }
+#endif
+                for (; i < head_size; i++) {
+                    xb[i] += a * v[i];
+                }
+            }
+        }
+
+        quantize(&xq_tensor, s->xb.data(), dim);
+        matmul(s->xb2.data(), &xq_tensor, &w->wo[l], dim, dim);
+
+        for (int i = 0; i < dim; i++) {
+            x[i] += s->xb2[i];
+        }
+
+        rmsnorm(s->xb.data(), x, w->rms_ffn_weight + l * dim, dim);
+
+        quantize(&xq_tensor, s->xb.data(), dim);
+        matmul(s->hb.data(), &xq_tensor, &w->w1[l], dim, hidden_dim);
+        matmul(s->hb2.data(), &xq_tensor, &w->w3[l], dim, hidden_dim);
 
 #pragma omp parallel for simd
-            for (int i = 0; i < hidden_dim; i++) {
-                float val = s->hb[i];
-                val *= (1.0f / (1.0f + std::exp(-val)));
-                val *= s->hb2[i];
-                s->hb[i] = val;
-            }
+        for (int i = 0; i < hidden_dim; i++) {
+            float val = s->hb[i];
+            val *= (1.0f / (1.0f + std::exp(-val)));
+            val *= s->hb2[i];
+            s->hb[i] = val;
+        }
 
-            QuantizedTensor hq_tensor{s->hq_q.data(), s->hq_s.data()};
-            quantize(&hq_tensor, s->hb.data(), hidden_dim);
-            matmul(s->xb.data(), &hq_tensor, &w->w2[l], hidden_dim, dim);
+        QuantizedTensor hq_tensor{s->hq_q.data(), s->hq_s.data()};
+        quantize(&hq_tensor, s->hb.data(), hidden_dim);
+        matmul(s->xb.data(), &hq_tensor, &w->w2[l], hidden_dim, dim);
 
-            for (int i = 0; i < dim; i++) {
-                x[i] += s->xb[i];
-            }
+        for (int i = 0; i < dim; i++) {
+            x[i] += s->xb[i];
+        }
+    }
+
+    float *QuantizedTransformer::forward(const int token, const int pos) {
+        const Config *p = &config;
+        const QuantizedTransformerWeights *w = &weights;
+        QuantizedRunState *s = &state;
+        float *x = s->x.data();
+        const int dim = p->dim;
+
+        std::copy_n(w->token_embedding_table.data() + token * dim, dim, x);
+
+        int start_layer = 0;
+        int end_layer = p->n_layers;
+
+        if (dist_config.mode == DistributedMode::Master) {
+            end_layer = dist_config.split_layer;
+        }
+
+        for (int l = start_layer; l < end_layer; l++) {
+            run_layer(l, pos, x);
+        }
+
+        if (dist_config.mode == DistributedMode::Master) {
+            if (!dist_config.transport) throw std::runtime_error("Transport not set for master");
+
+            // Combine pos and x
+            std::vector<char> buffer(sizeof(int) + dim * sizeof(float));
+            std::memcpy(buffer.data(), &pos, sizeof(int));
+            std::memcpy(buffer.data() + sizeof(int), x, dim * sizeof(float));
+
+            dist_config.transport->send(buffer.data(), buffer.size());
+
+            // Receive result
+            dist_config.transport->recv(x, dim * sizeof(float));
         }
 
         rmsnorm(x, x, w->rms_final_weight, dim);
@@ -933,5 +963,41 @@ namespace Inference {
         quantize(&xq_tensor, x, dim);
         matmul(s->logits.data(), &xq_tensor, w->wcls, dim, p->vocab_size);
         return s->logits.data();
+    }
+
+    void QuantizedTransformer::worker_loop() {
+        if (!dist_config.transport) throw std::runtime_error("Transport not set for worker");
+
+        float *x = state.x.data();
+        const int dim = config.dim;
+        int pos = 0;
+
+        const int start_layer = dist_config.split_layer;
+        const int end_layer = config.n_layers;
+
+        std::vector<char> buffer(sizeof(int) + dim * sizeof(float));
+
+        std::cout << "Worker started. Processing layers " << start_layer << " to " << end_layer - 1 << std::endl;
+
+        while (true) {
+            try {
+                // Receive combined buffer
+                dist_config.transport->recv(buffer.data(), buffer.size());
+
+                std::memcpy(&pos, buffer.data(), sizeof(int));
+                std::memcpy(x, buffer.data() + sizeof(int), dim * sizeof(float));
+
+                // Process layers
+                for (int l = start_layer; l < end_layer; l++) {
+                    run_layer(l, pos, x);
+                }
+
+                // Send back x
+                dist_config.transport->send(x, dim * sizeof(float));
+            } catch (const std::exception &e) {
+                std::cerr << "Worker loop error: " << e.what() << std::endl;
+                break;
+            }
+        }
     }
 } // namespace Inference

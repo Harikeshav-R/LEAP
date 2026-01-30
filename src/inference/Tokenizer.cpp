@@ -141,11 +141,11 @@ namespace Inference {
 
         auto comp = [](const PqElement &a, const PqElement &b) {
             // Priority 1: Higher score
-            if (std::abs(std::get<0>(a) - std::get<0>(b)) > 1e-6) {
-                return std::get<0>(a) < std::get<0>(b);
+            if (std::abs(std::get < 0 > (a) - std::get < 0 > (b)) > 1e-6) {
+                return std::get < 0 > (a) < std::get < 0 > (b);
             }
             // Priority 2: Smaller index (leftmost first)
-            return std::get<1>(a) > std::get<1>(b);
+            return std::get < 1 > (a) > std::get < 1 > (b);
         };
 
         std::priority_queue<PqElement, std::vector<PqElement>, decltype(comp)> queue(comp);

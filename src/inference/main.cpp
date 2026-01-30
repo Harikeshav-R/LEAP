@@ -2,6 +2,9 @@
 #include "Tokenizer.h"
 #include "Sampler.h"
 #include "Utils.h"
+#include "TcpTransport.h"
+#include "UdpTransport.h"
+#include "KernelTransport.h"
 #include <iostream>
 #include <vector>
 #include <string>
@@ -9,6 +12,7 @@
 using namespace Inference;
 
 void read_stdin(const char *guide, std::string &buffer) {
+    // ... (rest of file)
     std::cout << guide;
     std::getline(std::cin, buffer);
 }
@@ -166,6 +170,12 @@ void error_usage() {
     std::cerr << "  -z <string> optional path to custom tokenizer\n";
     std::cerr << "  -m <string> mode: generate|chat, default: generate\n";
     std::cerr << "  -y <string> (optional) system prompt in chat mode\n";
+    std::cerr << "Distributed Options:\n";
+    std::cerr << "  --dist <mode>  distributed mode: single|master|worker|master-udp|worker-udp|worker-kernel, default: single\n";
+    std::cerr << "  --ip <string>  worker IP address (for master) or bind address (for worker), default: 0.0.0.0\n";
+    std::cerr << "  --master-ip <string> master IP address (only for worker-kernel mode)\n";
+    std::cerr << "  --port <int>   port number, default: 9999\n";
+    std::cerr << "  --split <int>  layer index to split at, default: 0\n";
     std::exit(EXIT_FAILURE);
 }
 
@@ -180,6 +190,13 @@ int main(int argc, char *argv[]) {
     std::string mode = "generate";
     std::string system_prompt;
 
+    // Distributed args
+    std::string dist_mode_str = "single";
+    std::string ip = "0.0.0.0";
+    std::string master_ip = "";
+    int port = 9999;
+    int split_layer = 0;
+
     if (argc >= 2) {
         checkpoint_path = argv[1];
     } else {
@@ -188,10 +205,15 @@ int main(int argc, char *argv[]) {
 
     for (int i = 2; i < argc; i += 2) {
         if (i + 1 >= argc) error_usage();
-        if (argv[i][0] != '-') error_usage();
-        if (std::string(argv[i]).length() != 2) error_usage();
-
-        try {
+        // Check for long args
+        std::string arg = argv[i];
+        if (arg == "--dist") dist_mode_str = argv[i + 1];
+        else if (arg == "--ip") ip = argv[i + 1];
+        else if (arg == "--master-ip") master_ip = argv[i + 1];
+        else if (arg == "--port") port = std::stoi(argv[i + 1]);
+        else if (arg == "--split") split_layer = std::stoi(argv[i + 1]);
+        else if (arg[0] == '-') {
+            if (arg.length() != 2) error_usage();
             if (argv[i][1] == 't') temperature = std::stof(argv[i + 1]);
             else if (argv[i][1] == 'p') topp = std::stof(argv[i + 1]);
             else if (argv[i][1] == 's') rng_seed = std::stoll(argv[i + 1]);
@@ -201,7 +223,7 @@ int main(int argc, char *argv[]) {
             else if (argv[i][1] == 'm') mode = argv[i + 1];
             else if (argv[i][1] == 'y') system_prompt = argv[i + 1];
             else error_usage();
-        } catch (...) {
+        } else {
             error_usage();
         }
     }
@@ -214,10 +236,78 @@ int main(int argc, char *argv[]) {
     try {
         auto transformer = Transformer::create(checkpoint_path);
 
+        std::cout << "Model loaded successfully." << std::endl;
+        std::cout << "Config: ["
+                << transformer->config.n_layers << " layers, "
+                << transformer->config.dim << " dim, "
+                << transformer->config.n_heads << " heads, "
+                << transformer->config.vocab_size << " vocab, "
+                << transformer->config.seq_len << " seq_len]" << std::endl;
+
         if (steps == 0 || steps > transformer->config.seq_len) {
             steps = transformer->config.seq_len;
         }
 
+        // Setup Distributed Mode
+        DistributedMode dist_mode = DistributedMode::Single;
+        std::unique_ptr<Transport> transport = nullptr;
+
+        if (dist_mode_str == "master") {
+            dist_mode = DistributedMode::Master;
+            if (split_layer <= 0 || split_layer >= transformer->config.n_layers) {
+                std::cerr << "Invalid split layer for master mode" << std::endl;
+                return 1;
+            }
+            transport = std::make_unique<TcpTransport>(ip, port, false);
+            transport->initialize();
+        } else if (dist_mode_str == "worker") {
+            dist_mode = DistributedMode::Worker;
+            if (split_layer <= 0 || split_layer >= transformer->config.n_layers) {
+                std::cerr << "Invalid split layer for worker mode" << std::endl;
+                return 1;
+            }
+            transport = std::make_unique<TcpTransport>(ip, port, true);
+            transport->initialize();
+        } else if (dist_mode_str == "udp") {
+            // UDP Mode (Standard User Space UDP)
+            // Use --dist udp for both Master (client) and Worker (server) logic
+            // But we need to know role. Let's reuse 'master/worker' logic but add transport type arg?
+            // Simpler: --dist master-udp / --dist worker-udp / --dist worker-kernel
+            std::cerr << "Use specific modes: master-udp, worker-udp, worker-kernel" << std::endl;
+            return 1;
+        } else if (dist_mode_str == "master-udp") {
+            dist_mode = DistributedMode::Master;
+            transport = std::make_unique<UdpTransport>(ip, port, false);
+            transport->initialize();
+        } else if (dist_mode_str == "worker-udp") {
+            dist_mode = DistributedMode::Worker;
+            transport = std::make_unique<UdpTransport>(ip, port, true);
+            transport->initialize();
+        } else if (dist_mode_str == "worker-kernel") {
+#ifndef __linux__
+            std::cerr << "Error: --dist worker-kernel is only supported on Linux." << std::endl;
+            return 1;
+#else
+            dist_mode = DistributedMode::Worker;
+            // For worker-kernel, we need the Master's IP to set as destination
+            std::string target_ip = master_ip.empty() ? ip : master_ip;
+            transport = std::make_unique<KernelTransport>(target_ip, port);
+            transport->initialize();
+#endif
+        } else if (dist_mode_str != "single") {
+            std::cerr << "Unknown distributed mode: " << dist_mode_str << std::endl;
+            return 1;
+        }
+
+        transformer->set_distributed_config(dist_mode, split_layer, transport.get());
+
+        if (dist_mode == DistributedMode::Worker) {
+            // Worker enters loop and stays there
+            transformer->worker_loop();
+            return 0;
+        }
+
+        // Master or Single mode proceeds
         Tokenizer tokenizer(tokenizer_path, transformer->config.vocab_size);
         Sampler sampler(transformer->config.vocab_size, temperature, topp, rng_seed);
 

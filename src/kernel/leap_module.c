@@ -277,7 +277,7 @@ static int leap_dev_mmap(struct file *filp, struct vm_area_struct *vma) {
         return -EINVAL;
     }
 
-    vma->vm_flags |= VM_DONTEXPAND | VM_DONTDUMP;
+    vm_flags_set(vma, VM_DONTEXPAND | VM_DONTDUMP);
 
     // Manual mapping loop
     for (pos = 0; pos < size; pos += PAGE_SIZE) {

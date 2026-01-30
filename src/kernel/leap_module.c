@@ -267,13 +267,19 @@ static int leap_dev_mmap(struct file *filp, struct vm_area_struct *vma) {
     unsigned long size = vma->vm_end - vma->vm_start;
     int ret;
 
-    pr_alert("LEAP: mmap called. Size: %lu, TotalAlloc: %lu\n", size, total_alloc_size);
+    pr_alert("LEAP: mmap called. Size: %lu, Pgoff: %lu\n", size, vma->vm_pgoff);
 
     if (size > total_alloc_size) {
         pr_alert("LEAP: mmap failed! Request too large.\n");
         return -EINVAL;
     }
+
+    // Force offset to 0 to map from the start of our internal buffer
+    vma->vm_pgoff = 0;
     
+    // Set flags common for vmalloc mapping
+    vma->vm_flags |= VM_DONTEXPAND | VM_DONTDUMP;
+
     ret = remap_vmalloc_range(vma, leap_buffer, 0);
     if (ret) {
         pr_alert("LEAP: remap_vmalloc_range failed with error %d\n", ret);

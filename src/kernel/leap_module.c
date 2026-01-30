@@ -129,24 +129,19 @@ static unsigned int leap_nf_hook(void *priv, struct sk_buff *skb, const struct n
     iph = ip_hdr(skb);
     udph = (struct udphdr *)((unsigned char *)iph + ip_hlen);
 
-    // DEBUG: Print every UDP packet's dest port (ratelimited)
-    // if (printk_ratelimit()) {
-    //     printk(KERN_INFO "LEAP: Saw UDP packet to port %d (listening: %d)\n", ntohs(udph->dest), listening_port);
-    // }
-
     if (ntohs(udph->dest) != listening_port) {
         return NF_ACCEPT;
     }
 
     // It is for our port. Let's inspect.
-    printk(KERN_INFO "LEAP: UDP packet on port %d detected\n", listening_port);
+    // printk(KERN_INFO "LEAP: UDP packet on port %d detected\n", listening_port);
 
     payload_offset = ip_hlen + sizeof(struct udphdr);
     payload_len = ntohs(udph->len) - sizeof(struct udphdr);
 
     // Ensure we can read the LEAP header
     if (!pskb_may_pull(skb, payload_offset + sizeof(struct leap_header))) {
-        printk(KERN_INFO "LEAP: Packet too short for header\n");
+        printk(KERN_INFO "LEAP: REJECT - Packet too short for header (Len: %d)\n", payload_len);
         return NF_ACCEPT;
     }
 
@@ -155,7 +150,7 @@ static unsigned int leap_nf_hook(void *priv, struct sk_buff *skb, const struct n
     lhdr = (struct leap_header *)((unsigned char *)iph + payload_offset);
 
     if (lhdr->magic != cpu_to_be32(LEAP_MAGIC)) {
-        printk(KERN_INFO "LEAP: Invalid Magic: %x\n", ntohl(lhdr->magic));
+        printk(KERN_INFO "LEAP: REJECT - Invalid Magic. Saw: 0x%x, Expected: 0x%x\n", ntohl(lhdr->magic), LEAP_MAGIC);
         return NF_ACCEPT;
     }
 

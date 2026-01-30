@@ -278,7 +278,7 @@ static int leap_dev_mmap(struct file *filp, struct vm_area_struct *vma) {
     vma->vm_pgoff = 0;
     
     // Set flags common for vmalloc mapping
-    vma->vm_flags |= VM_DONTEXPAND | VM_DONTDUMP;
+    vm_flags_set(vma, VM_DONTEXPAND | VM_DONTDUMP);
 
     ret = remap_vmalloc_range(vma, leap_buffer, 0);
     if (ret) {

@@ -265,11 +265,20 @@ static long leap_dev_ioctl(struct file *filep, unsigned int cmd, unsigned long a
 
 static int leap_dev_mmap(struct file *filp, struct vm_area_struct *vma) {
     unsigned long size = vma->vm_end - vma->vm_start;
+    int ret;
+
+    pr_alert("LEAP: mmap called. Size: %lu, TotalAlloc: %lu\n", size, total_alloc_size);
+
     if (size > total_alloc_size) {
-        pr_alert("LEAP: mmap failed! Request: %lu bytes, Available: %lu bytes. Update module?\n", size, total_alloc_size);
+        pr_alert("LEAP: mmap failed! Request too large.\n");
         return -EINVAL;
     }
-    return remap_vmalloc_range(vma, leap_buffer, 0);
+    
+    ret = remap_vmalloc_range(vma, leap_buffer, 0);
+    if (ret) {
+        pr_alert("LEAP: remap_vmalloc_range failed with error %d\n", ret);
+    }
+    return ret;
 }
 
 static int __init leap_init(void) {

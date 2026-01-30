@@ -17,7 +17,7 @@
 #include "leap_protocol.h"
 
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("LEAP Agent");
+MODULE_AUTHOR("Harikeshav R");
 MODULE_DESCRIPTION("Low-Latency Tensor Transport for LEAP Inference");
 MODULE_VERSION("0.2");
 
@@ -28,11 +28,11 @@ static struct device* leap_device = NULL;
 static struct cdev leap_cdev;
 
 // Memory Buffer (Ring Buffer for RX)
-static void* leap_buffer = NULL;
+static void *leap_buffer = NULL;
 static unsigned long leap_buffer_size = LEAP_BUFFER_SIZE;
 
 // Synchronization
-static DECLARE_WAIT_QUEUE_HEAD(leap_wait_queue);
+static DECLARE_WAIT_QUEUE_HEAD (leap_wait_queue);
 static atomic_t data_ready = ATOMIC_INIT(0);
 static atomic_t open_count = ATOMIC_INIT(0); // Track if userspace is listening
 
@@ -40,19 +40,24 @@ static atomic_t open_count = ATOMIC_INIT(0); // Track if userspace is listening
 static struct socket *tx_socket = NULL;
 static struct sockaddr_in dest_addr;
 static unsigned int dest_ip = 0; // Stored in Network Byte Order
-static uint16_t dest_port = LEAP_PORT; // Default, but updated by RX
-static uint16_t listening_port = LEAP_PORT; // Default RX port
-static uint16_t global_seq_id = 0;
+static uint16_t dest_port = htons(LEAP_PORT); // Stored in Network Byte Order
+static uint16_t listening_port = htons(LEAP_PORT); // Stored in Network Byte Order
+static atomic_t global_seq_id = ATOMIC_INIT(0);
 
 // Netfilter Hook (RX)
 static struct nf_hook_ops leap_nf_ops;
 
 // ... (prototypes) ...
 static int leap_dev_open(struct inode *, struct file *);
+
 static int leap_dev_release(struct inode *, struct file *);
+
 static ssize_t leap_dev_write(struct file *, const char __user *, size_t, loff_t *);
+
 static long leap_dev_ioctl(struct file *, unsigned int, unsigned long);
+
 static int leap_dev_mmap(struct file *, struct vm_area_struct *);
+
 static unsigned int leap_nf_hook(void *priv, struct sk_buff *skb, const struct nf_hook_state *state);
 
 static struct file_operations fops = {
@@ -74,10 +79,10 @@ static int send_udp_chunk(void *data, size_t len, uint16_t seq, uint8_t chunk, u
     if (!tx_socket || dest_ip == 0) return -ENOTCONN;
 
     memset(&msg, 0, sizeof(msg));
-    
+
     // Update port dynamically
-    dest_addr.sin_port = dest_port; 
-    
+    dest_addr.sin_port = dest_port;
+
     msg.msg_name = &dest_addr;
     msg.msg_namelen = sizeof(dest_addr);
 
@@ -93,12 +98,14 @@ static int send_udp_chunk(void *data, size_t len, uint16_t seq, uint8_t chunk, u
     vec[1].iov_len = len;
 
     // Log TX attempt
-    printk(KERN_INFO "LEAP: Sending %lu bytes to %pI4:%d (seq %d)\n", len, &dest_addr.sin_addr.s_addr, ntohs(dest_addr.sin_port), seq);
+    printk(KERN_INFO "LEAP: Sending %lu bytes to %pI4:%d (seq %d)\n", len, &dest_addr.sin_addr.s_addr,
+           ntohs(dest_addr.sin_port), seq);
 
     // Kernel Send
     ret = kernel_sendmsg(tx_socket, &msg, vec, 2, sizeof(hdr) + len);
     if (ret < 0) {
-        printk(KERN_ERR "LEAP: TX Failed! Error: %d. Dest: %pI4:%d\n", ret, &dest_addr.sin_addr.s_addr, ntohs(dest_addr.sin_port));
+        printk(KERN_ERR "LEAP: TX Failed! Error: %d. Dest: %pI4:%d\n", ret, &dest_addr.sin_addr.s_addr,
+               ntohs(dest_addr.sin_port));
     }
     return ret;
 }
@@ -133,15 +140,23 @@ static unsigned int leap_nf_hook(void *priv, struct sk_buff *skb, const struct n
 
     // Reload iph as pskb_may_pull might have reallocated memory
     iph = ip_hdr(skb);
-    udph = (struct udphdr *)((unsigned char *)iph + ip_hlen);
+    udph = (struct udphdr *) ((unsigned char *) iph + ip_hlen);
 
     // DEBUG: Print every UDP packet's dest port (ratelimited)
     if (printk_ratelimit()) {
-        printk(KERN_INFO "LEAP: Saw UDP packet to port %d (listening: %d)\n", ntohs(udph->dest), listening_port);
+        printk(KERN_INFO "LEAP: Saw UDP packet to port %d (listening: %d)\n", ntohs(udph->dest), ntohs(listening_port));
     }
 
-    if (ntohs(udph->dest) != listening_port) {
+    if (udph->dest != listening_port) {
         return NF_ACCEPT;
+    }
+
+    // VALIDATION: Ensure UDP length is sufficient for UDP header + LEAP header
+    if (ntohs(udph->len) < sizeof(struct udphdr) + sizeof(struct leap_header)) {
+         if (printk_ratelimit()) {
+            printk(KERN_INFO "LEAP: REJECT - Packet too short (UDP Len: %d)\n", ntohs(udph->len));
+         }
+         return NF_ACCEPT;
     }
 
     // It is for our port. Let's inspect.
@@ -158,43 +173,55 @@ static unsigned int leap_nf_hook(void *priv, struct sk_buff *skb, const struct n
 
     // Reload pointers again
     iph = ip_hdr(skb);
-    lhdr = (struct leap_header *)((unsigned char *)iph + payload_offset);
+    lhdr = (struct leap_header *) ((unsigned char *) iph + payload_offset);
 
     if (lhdr->magic != cpu_to_be32(LEAP_MAGIC)) {
         printk(KERN_INFO "LEAP: REJECT - Invalid Magic. Saw: 0x%x, Expected: 0x%x\n", ntohl(lhdr->magic), LEAP_MAGIC);
         return NF_ACCEPT;
     }
 
+    if (lhdr->total_chunks == 0 || lhdr->chunk_id >= lhdr->total_chunks) {
+        printk(KERN_INFO "LEAP: REJECT - Invalid Chunk Info. Chunk: %d, Total: %d\n", lhdr->chunk_id, lhdr->total_chunks);
+        return NF_ACCEPT;
+    }
+
     // --- LEAP PACKET DETECTED ---
-    
+
     // Capture Source Port for Reply if needed
     if (dest_port != udph->source) {
         dest_port = udph->source;
     }
-    
+
     leap_offset = lhdr->chunk_id * LEAP_CHUNK_SIZE;
     int data_len = payload_len - sizeof(struct leap_header);
-    
+
+    if (data_len < 0) {
+        return NF_ACCEPT;
+    }
+
     // Safety check bounds
     if (leap_offset + data_len <= leap_buffer_size) {
         // Copy payload to kernel buffer
         // Note: lhdr + 1 points to the data immediately following the header
         memcpy(leap_buffer + leap_offset, lhdr + 1, data_len);
-        
+
         // printk(KERN_INFO "LEAP: Rx Chunk %d/%d (len %d)\n", lhdr->chunk_id, lhdr->total_chunks, data_len);
 
         // If last chunk, wake up reader
         if (lhdr->chunk_id == lhdr->total_chunks - 1) {
-             atomic_set(&data_ready, 1);
-             wake_up_interruptible(&leap_wait_queue);
-             // printk(KERN_INFO "LEAP: Tensor complete, waking reader\n");
+            atomic_set(&data_ready, 1);
+            wake_up_interruptible(&leap_wait_queue);
+            // printk(KERN_INFO "LEAP: Tensor complete, waking reader\n");
         }
     } else {
-        printk(KERN_ERR "LEAP: Buffer overflow attempt. Offset %d + Len %d > Size %ld\n", leap_offset, data_len, leap_buffer_size);
+        printk(KERN_ERR "LEAP: Buffer overflow attempt. Offset %d + Len %d > Size %ld\n", leap_offset, data_len,
+               leap_buffer_size);
     }
 
     // Stolen means we consumed the packet, OS stack won't see it.
-    return NF_STOLEN; 
+    // We must free the skb because ownership was transferred to us.
+    consume_skb(skb);
+    return NF_STOLEN;
 }
 
 // --- File Operations ---
@@ -209,7 +236,7 @@ static int leap_dev_open(struct inode *inodep, struct file *filep) {
 static int leap_dev_release(struct inode *inodep, struct file *filep) {
     atomic_dec(&open_count);
     // Reset listening port for safety so we don't accidentally intercept other traffic
-    listening_port = LEAP_PORT; 
+    listening_port = htons(LEAP_PORT);
     printk(KERN_INFO "LEAP: Device closed. Hook deactivated.\n");
     return 0;
 }
@@ -217,10 +244,17 @@ static int leap_dev_release(struct inode *inodep, struct file *filep) {
 // Write: Userspace writes a full tensor buffer here. We fragment and send.
 static ssize_t leap_dev_write(struct file *filep, const char __user *buffer, size_t len, loff_t *offset) {
     size_t processed = 0;
-    uint8_t total_chunks = (len + LEAP_CHUNK_SIZE - 1) / LEAP_CHUNK_SIZE;
+    uint8_t total_chunks;
     uint8_t chunk_idx = 0;
     void *kbuf;
-    
+
+    // Validate length: limit to buffer size and protocol limit (255 chunks)
+    if (len > leap_buffer_size || len > 255 * LEAP_CHUNK_SIZE) {
+        return -EMSGSIZE;
+    }
+
+    total_chunks = (len + LEAP_CHUNK_SIZE - 1) / LEAP_CHUNK_SIZE;
+
     if (!tx_socket) return -EIO;
 
     // Allocate temp buffer for the write operation
@@ -232,7 +266,7 @@ static ssize_t leap_dev_write(struct file *filep, const char __user *buffer, siz
         return -EFAULT;
     }
 
-    global_seq_id++;
+    uint16_t current_seq = (uint16_t)atomic_inc_return(&global_seq_id);
 
     while (processed < len) {
         size_t chunk_len = LEAP_CHUNK_SIZE;
@@ -240,7 +274,7 @@ static ssize_t leap_dev_write(struct file *filep, const char __user *buffer, siz
             chunk_len = len - processed;
         }
 
-        send_udp_chunk(kbuf + processed, chunk_len, global_seq_id, chunk_idx, total_chunks);
+        send_udp_chunk(kbuf + processed, chunk_len, current_seq, chunk_idx, total_chunks);
 
         processed += chunk_len;
         chunk_idx++;
@@ -276,11 +310,11 @@ static long leap_dev_ioctl(struct file *filep, unsigned int cmd, unsigned long a
         if (copy_from_user(&port_arg, (unsigned short __user *)arg, sizeof(port_arg))) {
             return -EFAULT;
         }
-        listening_port = port_arg;
+        listening_port = htons(port_arg);
         // Also update dest_port default if we haven't learned one yet
-        if (dest_port == LEAP_PORT) dest_port = port_arg;
-        
-        printk(KERN_INFO "LEAP: Listening on port %d\n", listening_port);
+        if (dest_port == htons(LEAP_PORT)) dest_port = htons(port_arg);
+
+        printk(KERN_INFO "LEAP: Listening on port %d\n", ntohs(listening_port));
         return 0;
     }
     return -EINVAL;
@@ -312,7 +346,7 @@ static int __init leap_init(void) {
     printk(KERN_INFO "LEAP: Initializing module\n");
 
     // 1. Allocate Kernel Buffer
-    leap_buffer = kmalloc(leap_buffer_size, GFP_KERNEL | __GFP_COMP); 
+    leap_buffer = kmalloc(leap_buffer_size, GFP_KERNEL | __GFP_COMP);
     if (!leap_buffer) {
         return -ENOMEM;
     }
@@ -320,7 +354,7 @@ static int __init leap_init(void) {
     {
         int i;
         for (i = 0; i < leap_buffer_size; i += PAGE_SIZE) {
-            SetPageReserved(virt_to_page(((unsigned long)leap_buffer) + i));
+            SetPageReserved(virt_to_page(((unsigned long) leap_buffer) + i));
         }
     }
     memset(leap_buffer, 0, leap_buffer_size);
@@ -351,7 +385,7 @@ static int __init leap_init(void) {
     leap_nf_ops.pf = PF_INET; // IPv4
     leap_nf_ops.hooknum = NF_INET_PRE_ROUTING;
     leap_nf_ops.priority = NF_IP_PRI_FIRST; // High priority
-    
+
     ret = nf_register_net_hook(&init_net, &leap_nf_ops);
     if (ret < 0) goto err_cdev;
 
@@ -361,7 +395,7 @@ static int __init leap_init(void) {
         printk(KERN_ERR "LEAP: Failed to create TX socket\n");
         goto err_nf;
     }
-    
+
     // Bind TX socket (optional but helps with source port consistency)
     /*
     struct sockaddr_in bind_addr;
@@ -403,7 +437,7 @@ static void __exit leap_exit(void) {
     if (leap_buffer) {
         int i;
         for (i = 0; i < leap_buffer_size; i += PAGE_SIZE) {
-            ClearPageReserved(virt_to_page(((unsigned long)leap_buffer) + i));
+            ClearPageReserved(virt_to_page(((unsigned long) leap_buffer) + i));
         }
         kfree(leap_buffer);
     }
@@ -411,5 +445,5 @@ static void __exit leap_exit(void) {
     printk(KERN_INFO "LEAP: Module unloaded\n");
 }
 
-module_init(leap_init);
-module_exit(leap_exit);
+module_init (leap_init);
+module_exit (leap_exit);

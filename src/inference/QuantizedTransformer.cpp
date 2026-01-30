@@ -436,7 +436,7 @@ namespace Inference {
                 val1 += static_cast<float>(ival1) * w->s[(in1 + j) / group_size] * sx;
                 val2 += static_cast<float>(ival2) * w->s[(in2 + j) / group_size] * sx;
                 val3 += static_cast<float>(ival3) * w->s[(in3 + j) / group_size] * sx;
-                                }
+                }
 #elif defined(__AVX2__)
                 for (int j = 0; j <= n - group_size; j += group_size) {
                     // Accumulators for 4 outputs
@@ -586,7 +586,7 @@ namespace Inference {
                         ival += static_cast<int32_t>(x->q[j + k_idx]) * static_cast<int32_t>(w->q[in + j + k_idx]);
                     }
                     val += static_cast<float>(ival) * w->s[(in + j) / group_size] * x->s[j / group_size];
-                                                                }
+                    }
 #elif defined(__AVX2__)
                     for (int j = 0; j <= n - group_size; j += group_size) {
                         __m256i sum = _mm256_setzero_si256();
@@ -930,7 +930,7 @@ namespace Inference {
         QuantizedRunState *s = &state;
         float *x = s->x.data();
         const int dim = p->dim;
-        
+
         std::copy_n(w->token_embedding_table.data() + token * dim, dim, x);
 
         int start_layer = 0;
@@ -945,17 +945,17 @@ namespace Inference {
         }
 
         if (dist_config.mode == DistributedMode::Master) {
-             if (!dist_config.transport) throw std::runtime_error("Transport not set for master");
-             
-             // Combine pos and x
-             std::vector<char> buffer(sizeof(int) + dim * sizeof(float));
-             std::memcpy(buffer.data(), &pos, sizeof(int));
-             std::memcpy(buffer.data() + sizeof(int), x, dim * sizeof(float));
+            if (!dist_config.transport) throw std::runtime_error("Transport not set for master");
 
-             dist_config.transport->send(buffer.data(), buffer.size());
+            // Combine pos and x
+            std::vector<char> buffer(sizeof(int) + dim * sizeof(float));
+            std::memcpy(buffer.data(), &pos, sizeof(int));
+            std::memcpy(buffer.data() + sizeof(int), x, dim * sizeof(float));
 
-             // Receive result
-             dist_config.transport->recv(x, dim * sizeof(float));
+            dist_config.transport->send(buffer.data(), buffer.size());
+
+            // Receive result
+            dist_config.transport->recv(x, dim * sizeof(float));
         }
 
         rmsnorm(x, x, w->rms_final_weight, dim);
@@ -968,13 +968,13 @@ namespace Inference {
     void QuantizedTransformer::worker_loop() {
         if (!dist_config.transport) throw std::runtime_error("Transport not set for worker");
 
-        float* x = state.x.data();
+        float *x = state.x.data();
         const int dim = config.dim;
         int pos = 0;
 
         const int start_layer = dist_config.split_layer;
         const int end_layer = config.n_layers;
-        
+
         std::vector<char> buffer(sizeof(int) + dim * sizeof(float));
 
         std::cout << "Worker started. Processing layers " << start_layer << " to " << end_layer - 1 << std::endl;
@@ -983,7 +983,7 @@ namespace Inference {
             try {
                 // Receive combined buffer
                 dist_config.transport->recv(buffer.data(), buffer.size());
-                
+
                 std::memcpy(&pos, buffer.data(), sizeof(int));
                 std::memcpy(x, buffer.data() + sizeof(int), dim * sizeof(float));
 
@@ -994,7 +994,7 @@ namespace Inference {
 
                 // Send back x
                 dist_config.transport->send(x, dim * sizeof(float));
-            } catch (const std::exception& e) {
+            } catch (const std::exception &e) {
                 std::cerr << "Worker loop error: " << e.what() << std::endl;
                 break;
             }

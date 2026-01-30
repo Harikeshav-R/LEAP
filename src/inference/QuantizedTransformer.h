@@ -86,7 +86,7 @@ namespace Inference {
         void init_run_state();
 
         void precompute_freqs();
-        
+
         void run_layer(int l, int pos, float *x);
 
         // Helpers

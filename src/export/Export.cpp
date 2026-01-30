@@ -220,7 +220,7 @@ namespace Export {
         auto launch_quantize = [&](size_t idx) {
             return std::async(std::launch::async, [=, &weights]() {
                 const auto result = quantize_q80(weights[idx], group_size);
-                return QuantResult{std::get<0>(result), std::get<1>(result), std::get<2>(result)};
+                return QuantResult{std::get < 0 > (result), std::get < 1 > (result), std::get < 2 > (result)};
             });
         };
 

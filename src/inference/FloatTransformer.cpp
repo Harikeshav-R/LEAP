@@ -666,7 +666,7 @@ namespace Inference {
         FloatRunState *s = &state;
         float *x = s->x.data();
         const int dim = p->dim;
-        
+
         const float *content_row = w->token_embedding_table + token * dim;
         std::copy_n(content_row, dim, x);
 
@@ -683,7 +683,7 @@ namespace Inference {
 
         if (dist_config.mode == DistributedMode::Master) {
             if (!dist_config.transport) throw std::runtime_error("Transport not set for master");
-            
+
             // Combine pos and x into one buffer to avoid transport race conditions
             std::vector<char> buffer(sizeof(int) + dim * sizeof(float));
             std::memcpy(buffer.data(), &pos, sizeof(int));
@@ -702,14 +702,14 @@ namespace Inference {
 
     void FloatTransformer::worker_loop() {
         if (!dist_config.transport) throw std::runtime_error("Transport not set for worker");
-        
-        float* x = state.x.data();
+
+        float *x = state.x.data();
         const int dim = config.dim;
         int pos = 0;
-        
+
         const int start_layer = dist_config.split_layer;
         const int end_layer = config.n_layers;
-        
+
         std::vector<char> buffer(sizeof(int) + dim * sizeof(float));
 
         std::cout << "Worker started. Processing layers " << start_layer << " to " << end_layer - 1 << std::endl;
@@ -718,7 +718,7 @@ namespace Inference {
             try {
                 // Receive combined buffer
                 dist_config.transport->recv(buffer.data(), buffer.size());
-                
+
                 std::memcpy(&pos, buffer.data(), sizeof(int));
                 std::memcpy(x, buffer.data() + sizeof(int), dim * sizeof(float));
 
@@ -729,7 +729,7 @@ namespace Inference {
 
                 // Send back x
                 dist_config.transport->send(x, dim * sizeof(float));
-            } catch (const std::exception& e) {
+            } catch (const std::exception &e) {
                 std::cerr << "Worker loop error: " << e.what() << std::endl;
                 break;
             }

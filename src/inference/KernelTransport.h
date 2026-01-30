@@ -8,10 +8,13 @@ namespace Inference {
     class KernelTransport : public Transport {
     public:
         KernelTransport(std::string dest_ip, int port);
+
         ~KernelTransport() override;
 
         void initialize() override;
+
         void send(const void *data, size_t size) override;
+
         void recv(void *data, size_t size) override;
 
     private:

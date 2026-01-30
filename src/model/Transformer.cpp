@@ -142,7 +142,7 @@ namespace Model {
 
             if (temperature == 0.0) {
                 auto max_result = logits.topk(1, -1);
-                idx_next = std::get<1>(max_result);
+                idx_next = std::get < 1 > (max_result);
             } else {
                 if (std::abs(temperature - 1.0) > 1e-6) {
                     logits /= temperature;
@@ -150,7 +150,7 @@ namespace Model {
                 if (top_k.has_value()) {
                     const int64_t k = std::min(top_k.value(), logits.size(-1));
                     auto topk_result = logits.topk(k);
-                    auto v = std::get<0>(topk_result);
+                    auto v = std::get < 0 > (topk_result);
                     auto pivot = v.select(1, -1).unsqueeze(1);
                     logits = torch::where(logits < pivot,
                                           torch::tensor(-std::numeric_limits<float>::infinity(), logits.options()),

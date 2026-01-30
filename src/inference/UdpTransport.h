@@ -10,10 +10,13 @@ namespace Inference {
     class UdpTransport : public Transport {
     public:
         UdpTransport(std::string ip, int port, bool is_server);
+
         ~UdpTransport() override;
 
         void initialize() override;
+
         void send(const void *data, size_t size) override;
+
         void recv(void *data, size_t size) override;
 
     private:

@@ -25,10 +25,10 @@ namespace Inference {
         memset(&dest_addr, 0, sizeof(dest_addr));
         dest_addr.sin_family = AF_INET;
         dest_addr.sin_port = htons(port);
-        
+
         if (is_server) {
             dest_addr.sin_addr.s_addr = INADDR_ANY;
-            if (bind(sockfd, (struct sockaddr *)&dest_addr, sizeof(dest_addr)) < 0) {
+            if (bind(sockfd, (struct sockaddr *) &dest_addr, sizeof(dest_addr)) < 0) {
                 throw std::runtime_error("Bind failed");
             }
             std::cout << "UDP Worker listening on port " << port << "..." << std::endl;
@@ -55,7 +55,7 @@ namespace Inference {
             // Construct Packet
             std::vector<uint8_t> packet(sizeof(leap_header) + chunk_len);
             auto *hdr = reinterpret_cast<leap_header *>(packet.data());
-            
+
             hdr->magic = htonl(LEAP_MAGIC);
             hdr->seq_id = htons(seq_id);
             hdr->chunk_id = chunk_idx;
@@ -63,8 +63,8 @@ namespace Inference {
 
             std::memcpy(packet.data() + sizeof(leap_header), bytes + processed, chunk_len);
 
-            if (sendto(sockfd, packet.data(), packet.size(), 0, 
-                       (struct sockaddr *)&dest_addr, sizeof(dest_addr)) < 0) {
+            if (sendto(sockfd, packet.data(), packet.size(), 0,
+                       (struct sockaddr *) &dest_addr, sizeof(dest_addr)) < 0) {
                 throw std::runtime_error("UDP send failed");
             }
 
@@ -86,15 +86,19 @@ namespace Inference {
             socklen_t addr_len = sizeof(src_addr);
 
             ssize_t len = recvfrom(sockfd, packet.data(), packet.size(), 0,
-                                   (struct sockaddr *)&src_addr, &addr_len);
-            
+                                   (struct sockaddr *) &src_addr, &addr_len);
+
             if (len < 0) throw std::runtime_error("UDP recv failed");
-            
+
             // If we are a worker (server), remember who sent us data so we can reply
-            if (is_server && dest_addr.sin_addr.s_addr == INADDR_ANY) {
+            if (is_server &&dest_addr
+            .
+            sin_addr.s_addr == INADDR_ANY
+            )
+            {
                 dest_addr = src_addr;
-                std::cout << "Worker: Locked onto Master at " << inet_ntoa(src_addr.sin_addr) 
-                          << ":" << ntohs(src_addr.sin_port) << std::endl;
+                std::cout << "Worker: Locked onto Master at " << inet_ntoa(src_addr.sin_addr)
+                        << ":" << ntohs(src_addr.sin_port) << std::endl;
             }
 
             if (static_cast<size_t>(len) < sizeof(leap_header)) continue;
@@ -103,7 +107,7 @@ namespace Inference {
             if (ntohl(hdr->magic) != LEAP_MAGIC) continue; // Not our packet
 
             size_t payload_len = len - sizeof(leap_header);
-            
+
             // In a real implementation, check seq_id and chunk_id
             // Here, we just copy blindly for minimal latency demonstration
             if (received_bytes + payload_len > size) payload_len = size - received_bytes;

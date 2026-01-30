@@ -5,6 +5,7 @@
 #include <linux/types.h>
 #else
 #include <stdint.h>
+#include <sys/ioctl.h>
 // Userspace compatibility definitions
 typedef uint32_t __be32;
 typedef uint16_t __be16;

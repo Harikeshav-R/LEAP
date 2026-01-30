@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.28)
 project(LEAP)
 
+option(BUILD_KERNEL_MODULE "Build the LEAP Linux Kernel Module" OFF)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -214,7 +216,7 @@ endforeach ()
 # 5. Linux Kernel Module (Only on Linux)
 # ------------------------------------------------------------------------------
 
-if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND BUILD_KERNEL_MODULE)
     message(STATUS "Configuring Kernel Module build...")
     
     # Define a custom target that invokes the kernel Makefile

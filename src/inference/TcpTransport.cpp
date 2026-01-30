@@ -38,7 +38,7 @@ namespace Inference {
         if (is_server) {
             // Server Mode (Worker)
             serv_addr.sin_addr.s_addr = INADDR_ANY;
-            
+
             int opt = 1;
             if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
                 throw std::runtime_error("setsockopt failed");
@@ -59,10 +59,9 @@ namespace Inference {
             if (clientfd < 0) {
                 throw std::runtime_error("Accept failed");
             }
-            
+
             setup_socket_low_latency(clientfd);
             std::cout << "Master connected!" << std::endl;
-
         } else {
             // Client Mode (Master)
             if (inet_pton(AF_INET, ip.c_str(), &serv_addr.sin_addr) <= 0) {
@@ -73,7 +72,7 @@ namespace Inference {
             if (connect(sockfd, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0) {
                 throw std::runtime_error("Connection failed");
             }
-            
+
             setup_socket_low_latency(sockfd);
             std::cout << "Connected to worker!" << std::endl;
         }

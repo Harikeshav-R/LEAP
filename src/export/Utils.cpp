@@ -12,7 +12,7 @@ namespace Export {
         if (t.dtype() != torch::kFloat32) t = t.to(torch::kFloat32);
         if (!t.is_contiguous()) t = t.contiguous();
 
-        const auto data_ptr = t.data_ptr<float>();
+        const auto data_ptr = t.data_ptr < float > ();
         const auto num_bytes = t.numel() * sizeof(float);
         out.write(reinterpret_cast<const char *>(data_ptr), num_bytes);
     }
@@ -22,7 +22,7 @@ namespace Export {
         // Note: .to(kInt8) handles contiguous implicitly if needed or returns copy
         // But to be safe:
         const auto contig = d.contiguous();
-        const auto data_ptr = contig.data_ptr<int8_t>();
+        const auto data_ptr = contig.data_ptr < int8_t > ();
         const auto num_bytes = contig.numel() * sizeof(int8_t);
         out.write(reinterpret_cast<const char *>(data_ptr), num_bytes);
     }

@@ -10,11 +10,16 @@
 #include <cstring>
 
 namespace Inference {
-    KernelTransport::KernelTransport(std::string dest_ip, int port) 
-        : dest_ip(std::move(dest_ip)), port(port) {}
+    KernelTransport::KernelTransport(std::string dest_ip, int port)
+        : dest_ip(std::move(dest_ip)), port(port) {
+    }
 
     KernelTransport::~KernelTransport() {
-        if (mmap_ptr && mmap_ptr != MAP_FAILED) munmap(mmap_ptr, LEAP_BUFFER_SIZE);
+        if (mmap_ptr &&mmap_ptr 
+        !=
+        MAP_FAILED
+        )
+        munmap(mmap_ptr, LEAP_BUFFER_SIZE);
         if (fd != -1) close(fd);
     }
 
@@ -29,15 +34,15 @@ namespace Inference {
         // Set Listening Port
         unsigned short port_short = static_cast<unsigned short>(port);
         if (ioctl(fd, LEAP_IOCTL_SET_PORT, &port_short) < 0) {
-             std::cerr << "Warning: Failed to set listening port in kernel" << std::endl;
+            std::cerr << "Warning: Failed to set listening port in kernel" << std::endl;
         }
 
         // Configure Destination IP for Sending
         unsigned int ip_int;
         if (inet_pton(AF_INET, dest_ip.c_str(), &ip_int) <= 0) {
-             throw std::runtime_error("Invalid IP for KernelTransport");
+            throw std::runtime_error("Invalid IP for KernelTransport");
         }
-        
+
         if (ioctl(fd, LEAP_IOCTL_SET_DEST, &ip_int) < 0) {
             std::cerr << "Warning: Failed to set destination IP in kernel" << std::endl;
         }

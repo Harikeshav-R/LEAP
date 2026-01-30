@@ -177,6 +177,7 @@ static unsigned int leap_nf_hook(void *priv, struct sk_buff *skb, const struct n
 static int leap_dev_open(struct inode *inodep, struct file *filep) {
     if (atomic_read(&open_count) > 0) return -EBUSY;
     atomic_inc(&open_count);
+    pr_alert("LEAP: Device opened by PID %d\n", current->pid);
     return 0;
 }
 
@@ -265,7 +266,7 @@ static long leap_dev_ioctl(struct file *filep, unsigned int cmd, unsigned long a
 static int leap_dev_mmap(struct file *filp, struct vm_area_struct *vma) {
     unsigned long size = vma->vm_end - vma->vm_start;
     if (size > total_alloc_size) {
-        printk(KERN_ERR "LEAP: mmap failed. Request: %lu, Available: %lu\n", size, total_alloc_size);
+        pr_alert("LEAP: mmap failed! Request: %lu bytes, Available: %lu bytes. Update module?\n", size, total_alloc_size);
         return -EINVAL;
     }
     return remap_vmalloc_range(vma, leap_buffer, 0);
@@ -274,6 +275,9 @@ static int leap_dev_mmap(struct file *filp, struct vm_area_struct *vma) {
 static int __init leap_init(void) {
     int ret;
     dev_t dev_no;
+    
+    pr_alert("LEAP: Initializing module v0.5 (Double Buffered 16MB)\n");
+
     total_alloc_size = leap_buffer_size * 2;
     leap_buffer = vmalloc(total_alloc_size);
     if (!leap_buffer) return -ENOMEM;

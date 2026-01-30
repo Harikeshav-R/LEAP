@@ -286,7 +286,7 @@ int main(int argc, char *argv[]) {
             return 1;
 #else
             dist_mode = DistributedMode::Worker;
-            transport = std::make_unique<KernelTransport>(ip); 
+            transport = std::make_unique<KernelTransport>(ip, port); 
             transport->initialize();
 #endif
         } else if (dist_mode_str != "single") {

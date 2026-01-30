@@ -132,6 +132,11 @@ static unsigned int leap_nf_hook(void *priv, struct sk_buff *skb, const struct n
     iph = ip_hdr(skb);
     udph = (struct udphdr *)((unsigned char *)iph + ip_hlen);
 
+    // DEBUG: Print every UDP packet's dest port (ratelimited)
+    if (printk_ratelimit()) {
+        printk(KERN_INFO "LEAP: Saw UDP packet to port %d (listening: %d)\n", ntohs(udph->dest), listening_port);
+    }
+
     if (ntohs(udph->dest) != listening_port) {
         return NF_ACCEPT;
     }

@@ -111,8 +111,13 @@ static unsigned int leap_nf_hook(void *priv, struct sk_buff *skb, const struct n
 
     if (iph->protocol != IPPROTO_UDP) return NF_ACCEPT;
 
-    udph = udp_hdr(skb);
-    if (!udph || ntohs(udph->dest) != LEAP_PORT) return NF_ACCEPT;
+    // In PRE_ROUTING, transport_header might not be set. Calculate manually.
+    udph = (struct udphdr *)((unsigned char *)iph + (iph->ihl * 4));
+
+    // Basic bounds check
+    if (skb->len < (iph->ihl * 4) + sizeof(struct udphdr)) return NF_ACCEPT;
+
+    if (ntohs(udph->dest) != LEAP_PORT) return NF_ACCEPT;
 
     // Calculate payload position
     payload = (unsigned char *)udph + sizeof(struct udphdr);

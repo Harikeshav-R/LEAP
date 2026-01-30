@@ -7,7 +7,7 @@
 namespace Inference {
     class KernelTransport : public Transport {
     public:
-        KernelTransport(std::string dest_ip);
+        KernelTransport(std::string dest_ip, int port);
         ~KernelTransport() override;
 
         void initialize() override;
@@ -16,6 +16,7 @@ namespace Inference {
 
     private:
         std::string dest_ip;
+        int port;
         int fd = -1;
         void *mmap_ptr = nullptr;
     };

@@ -6,6 +6,7 @@
 #include <iostream>
 #include <vector>
 #include <algorithm>
+#include <cstring>
 
 #if defined(__ARM_NEON)
 #include <arm_neon.h>

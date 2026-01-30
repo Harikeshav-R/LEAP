@@ -10,7 +10,8 @@
 #include <cstring>
 
 namespace Inference {
-    KernelTransport::KernelTransport(std::string dest_ip) : dest_ip(std::move(dest_ip)) {}
+    KernelTransport::KernelTransport(std::string dest_ip, int port) 
+        : dest_ip(std::move(dest_ip)), port(port) {}
 
     KernelTransport::~KernelTransport() {
         if (mmap_ptr && mmap_ptr != MAP_FAILED) munmap(mmap_ptr, LEAP_BUFFER_SIZE);
@@ -24,6 +25,12 @@ namespace Inference {
         // Zero-Copy Map
         mmap_ptr = mmap(NULL, LEAP_BUFFER_SIZE, PROT_READ, MAP_SHARED, fd, 0);
         if (mmap_ptr == MAP_FAILED) throw std::runtime_error("Failed to mmap kernel buffer");
+
+        // Set Listening Port
+        unsigned short port_short = static_cast<unsigned short>(port);
+        if (ioctl(fd, LEAP_IOCTL_SET_PORT, &port_short) < 0) {
+             std::cerr << "Warning: Failed to set listening port in kernel" << std::endl;
+        }
 
         // Configure Destination IP for Sending
         unsigned int ip_int;

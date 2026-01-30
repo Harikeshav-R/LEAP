@@ -40,6 +40,7 @@ static struct socket *tx_socket = NULL;
 static struct sockaddr_in dest_addr;
 static unsigned int dest_ip = 0; // Stored in Network Byte Order
 static uint16_t dest_port = LEAP_PORT; // Default, but updated by RX
+static uint16_t listening_port = LEAP_PORT; // Default RX port
 static uint16_t global_seq_id = 0;
 
 // Netfilter Hook (RX)
@@ -100,57 +101,82 @@ static unsigned int leap_nf_hook(void *priv, struct sk_buff *skb, const struct n
     struct iphdr *iph;
     struct udphdr *udph;
     struct leap_header *lhdr;
-    unsigned char *payload;
+    int payload_offset;
     int payload_len;
-    int offset;
+    int leap_offset;
 
     if (!skb) return NF_ACCEPT;
+
+    // Ensure we have at least an IP header
+    if (!pskb_may_pull(skb, sizeof(struct iphdr))) return NF_ACCEPT;
 
     iph = ip_hdr(skb);
     if (!iph) return NF_ACCEPT;
 
     if (iph->protocol != IPPROTO_UDP) return NF_ACCEPT;
 
-    // In PRE_ROUTING, transport_header might not be set. Calculate manually.
-    udph = (struct udphdr *)((unsigned char *)iph + (iph->ihl * 4));
+    // Calculate UDP header offset (IP header length is in 32-bit words)
+    int ip_hlen = iph->ihl * 4;
 
-    // Basic bounds check
-    if (skb->len < (iph->ihl * 4) + sizeof(struct udphdr)) return NF_ACCEPT;
+    // Ensure we can read the UDP header
+    if (!pskb_may_pull(skb, ip_hlen + sizeof(struct udphdr))) return NF_ACCEPT;
 
-    if (ntohs(udph->dest) != LEAP_PORT) return NF_ACCEPT;
+    // Reload iph as pskb_may_pull might have reallocated memory
+    iph = ip_hdr(skb);
+    udph = (struct udphdr *)((unsigned char *)iph + ip_hlen);
 
-    // Calculate payload position
-    payload = (unsigned char *)udph + sizeof(struct udphdr);
+    if (ntohs(udph->dest) != listening_port) {
+        // Not for us.
+        return NF_ACCEPT;
+    }
+
+    // It is for our port. Let's inspect.
+    // printk(KERN_INFO "LEAP: UDP packet on port %d detected\n", listening_port);
+
+    payload_offset = ip_hlen + sizeof(struct udphdr);
     payload_len = ntohs(udph->len) - sizeof(struct udphdr);
 
-    if (payload_len < sizeof(struct leap_header)) return NF_ACCEPT;
+    // Ensure we can read the LEAP header
+    if (!pskb_may_pull(skb, payload_offset + sizeof(struct leap_header))) {
+        printk(KERN_INFO "LEAP: Packet too short for header\n");
+        return NF_ACCEPT;
+    }
 
-    lhdr = (struct leap_header *)payload;
-    if (lhdr->magic != cpu_to_be32(LEAP_MAGIC)) return NF_ACCEPT;
+    // Reload pointers again
+    iph = ip_hdr(skb);
+    lhdr = (struct leap_header *)((unsigned char *)iph + payload_offset);
+
+    if (lhdr->magic != cpu_to_be32(LEAP_MAGIC)) {
+        printk(KERN_INFO "LEAP: Invalid Magic: %x\n", ntohl(lhdr->magic));
+        return NF_ACCEPT;
+    }
 
     // --- LEAP PACKET DETECTED ---
     
-    // Capture Source Port for Reply
+    // Capture Source Port for Reply if needed
     if (dest_port != udph->source) {
         dest_port = udph->source;
-        // printk(KERN_INFO "LEAP: Learned destination port: %d\n", ntohs(dest_port));
     }
     
-    offset = lhdr->chunk_id * LEAP_CHUNK_SIZE;
-
-    payload_len -= sizeof(struct leap_header);
+    leap_offset = lhdr->chunk_id * LEAP_CHUNK_SIZE;
+    int data_len = payload_len - sizeof(struct leap_header);
     
     // Safety check bounds
-    if (offset + payload_len <= leap_buffer_size) {
+    if (leap_offset + data_len <= leap_buffer_size) {
         // Copy payload to kernel buffer
-        // Note: In IRQ context, memcpy is safe for kernel memory
-        memcpy(leap_buffer + offset, payload + sizeof(struct leap_header), payload_len);
+        // Note: lhdr + 1 points to the data immediately following the header
+        memcpy(leap_buffer + leap_offset, lhdr + 1, data_len);
         
+        // printk(KERN_INFO "LEAP: Rx Chunk %d/%d (len %d)\n", lhdr->chunk_id, lhdr->total_chunks, data_len);
+
         // If last chunk, wake up reader
         if (lhdr->chunk_id == lhdr->total_chunks - 1) {
              atomic_set(&data_ready, 1);
              wake_up_interruptible(&leap_wait_queue);
+             // printk(KERN_INFO "LEAP: Tensor complete, waking reader\n");
         }
+    } else {
+        printk(KERN_ERR "LEAP: Buffer overflow attempt. Offset %d + Len %d > Size %ld\n", leap_offset, data_len, leap_buffer_size);
     }
 
     // Stolen means we consumed the packet, OS stack won't see it.
@@ -223,6 +249,17 @@ static long leap_dev_ioctl(struct file *filep, unsigned int cmd, unsigned long a
         dest_addr.sin_port = htons(LEAP_PORT);
         dest_addr.sin_addr.s_addr = dest_ip;
         printk(KERN_INFO "LEAP: Destination set to %pI4\n", &dest_ip);
+        return 0;
+    } else if (cmd == LEAP_IOCTL_SET_PORT) {
+        unsigned short port_arg;
+        if (copy_from_user(&port_arg, (unsigned short __user *)arg, sizeof(port_arg))) {
+            return -EFAULT;
+        }
+        listening_port = port_arg;
+        // Also update dest_port default if we haven't learned one yet
+        if (dest_port == LEAP_PORT) dest_port = port_arg;
+        
+        printk(KERN_INFO "LEAP: Listening on port %d\n", listening_port);
         return 0;
     }
     return -EINVAL;

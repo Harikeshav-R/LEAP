@@ -46,6 +46,21 @@ static uint16_t global_seq_id = 0;
 static struct nf_hook_ops leap_nf_ops;
 
 // ... (prototypes) ...
+static int leap_dev_open(struct inode *, struct file *);
+static int leap_dev_release(struct inode *, struct file *);
+static ssize_t leap_dev_write(struct file *, const char __user *, size_t, loff_t *);
+static long leap_dev_ioctl(struct file *, unsigned int, unsigned long);
+static int leap_dev_mmap(struct file *, struct vm_area_struct *);
+static unsigned int leap_nf_hook(void *priv, struct sk_buff *skb, const struct nf_hook_state *state);
+
+static struct file_operations fops = {
+    .owner = THIS_MODULE,
+    .open = leap_dev_open,
+    .release = leap_dev_release,
+    .write = leap_dev_write,
+    .unlocked_ioctl = leap_dev_ioctl,
+    .mmap = leap_dev_mmap,
+};
 
 // --- Helper: Send UDP Chunk ---
 static int send_udp_chunk(void *data, size_t len, uint16_t seq, uint8_t chunk, uint8_t total) {

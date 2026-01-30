@@ -26,7 +26,9 @@ namespace Inference {
 
         // Zero-Copy Map - Map BOTH buffers (RX + TX) = 16MB
         mmap_ptr = mmap(NULL, LEAP_BUFFER_SIZE * 2, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-        if (mmap_ptr == MAP_FAILED) throw std::runtime_error("Failed to mmap kernel buffer");
+        if (mmap_ptr == MAP_FAILED) {
+            throw std::runtime_error(std::string("Failed to mmap kernel buffer: ") + std::strerror(errno));
+        }
 
         // Set Listening Port
         unsigned short port_short = static_cast<unsigned short>(port);

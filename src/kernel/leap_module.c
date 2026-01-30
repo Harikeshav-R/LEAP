@@ -265,26 +265,36 @@ static long leap_dev_ioctl(struct file *filep, unsigned int cmd, unsigned long a
 
 static int leap_dev_mmap(struct file *filp, struct vm_area_struct *vma) {
     unsigned long size = vma->vm_end - vma->vm_start;
+    unsigned long pos;
+    unsigned long start = vma->vm_start;
+    struct page *page;
     int ret;
 
-    pr_alert("LEAP: mmap called. Size: %lu, Pgoff: %lu\n", size, vma->vm_pgoff);
+    pr_alert("LEAP: mmap called (manual). Size: %lu\n", size);
 
     if (size > total_alloc_size) {
         pr_alert("LEAP: mmap failed! Request too large.\n");
         return -EINVAL;
     }
 
-    // Force offset to 0 to map from the start of our internal buffer
-    vma->vm_pgoff = 0;
-    
-    // Set flags common for vmalloc mapping
-    vm_flags_set(vma, VM_DONTEXPAND | VM_DONTDUMP);
+    vma->vm_flags |= VM_DONTEXPAND | VM_DONTDUMP;
 
-    ret = remap_vmalloc_range(vma, leap_buffer, 0);
-    if (ret) {
-        pr_alert("LEAP: remap_vmalloc_range failed with error %d\n", ret);
+    // Manual mapping loop
+    for (pos = 0; pos < size; pos += PAGE_SIZE) {
+        page = vmalloc_to_page(leap_buffer + pos);
+        if (!page) {
+            pr_alert("LEAP: vmalloc_to_page failed at offset %lu\n", pos);
+            return -EFAULT;
+        }
+
+        ret = vm_insert_page(vma, start + pos, page);
+        if (ret < 0) {
+            pr_alert("LEAP: vm_insert_page failed at offset %lu, error %d\n", pos, ret);
+            return ret;
+        }
     }
-    return ret;
+    
+    return 0;
 }
 
 static int __init leap_init(void) {

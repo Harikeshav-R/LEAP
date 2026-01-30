@@ -94,6 +94,9 @@ static int send_udp_chunk(void *data, size_t len, uint16_t seq, uint8_t chunk, u
 
     // Kernel Send
     ret = kernel_sendmsg(tx_socket, &msg, vec, 2, sizeof(hdr) + len);
+    if (ret < 0) {
+        printk(KERN_ERR "LEAP: TX Failed! Error: %d. Dest: %pI4:%d\n", ret, &dest_addr.sin_addr.s_addr, ntohs(dest_addr.sin_port));
+    }
     return ret;
 }
 
@@ -350,6 +353,16 @@ static int __init leap_init(void) {
         printk(KERN_ERR "LEAP: Failed to create TX socket\n");
         goto err_nf;
     }
+    
+    // Bind TX socket (optional but helps with source port consistency)
+    /*
+    struct sockaddr_in bind_addr;
+    memset(&bind_addr, 0, sizeof(bind_addr));
+    bind_addr.sin_family = AF_INET;
+    bind_addr.sin_port = htons(0); // Ephemeral
+    bind_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    ret = tx_socket->ops->bind(tx_socket, (struct sockaddr *)&bind_addr, sizeof(bind_addr));
+    */
 
     printk(KERN_INFO "LEAP: Module loaded. /dev/%s created with major %d\n", LEAP_DEVICE_NAME, major_number);
     return 0;

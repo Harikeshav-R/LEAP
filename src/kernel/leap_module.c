@@ -34,6 +34,7 @@ static unsigned long leap_buffer_size = LEAP_BUFFER_SIZE;
 // Synchronization
 static DECLARE_WAIT_QUEUE_HEAD(leap_wait_queue);
 static atomic_t data_ready = ATOMIC_INIT(0);
+static atomic_t open_count = ATOMIC_INIT(0); // Track if userspace is listening
 
 // Networking (TX)
 static struct socket *tx_socket = NULL;
@@ -107,6 +108,9 @@ static unsigned int leap_nf_hook(void *priv, struct sk_buff *skb, const struct n
 
     if (!skb) return NF_ACCEPT;
 
+    // Only intervene if a userspace process has the device open!
+    if (atomic_read(&open_count) == 0) return NF_ACCEPT;
+
     // Ensure we have at least an IP header
     if (!pskb_may_pull(skb, sizeof(struct iphdr))) return NF_ACCEPT;
 
@@ -125,13 +129,17 @@ static unsigned int leap_nf_hook(void *priv, struct sk_buff *skb, const struct n
     iph = ip_hdr(skb);
     udph = (struct udphdr *)((unsigned char *)iph + ip_hlen);
 
+    // DEBUG: Print every UDP packet's dest port (ratelimited)
+    // if (printk_ratelimit()) {
+    //     printk(KERN_INFO "LEAP: Saw UDP packet to port %d (listening: %d)\n", ntohs(udph->dest), listening_port);
+    // }
+
     if (ntohs(udph->dest) != listening_port) {
-        // Not for us.
         return NF_ACCEPT;
     }
 
     // It is for our port. Let's inspect.
-    // printk(KERN_INFO "LEAP: UDP packet on port %d detected\n", listening_port);
+    printk(KERN_INFO "LEAP: UDP packet on port %d detected\n", listening_port);
 
     payload_offset = ip_hlen + sizeof(struct udphdr);
     payload_len = ntohs(udph->len) - sizeof(struct udphdr);
@@ -186,10 +194,17 @@ static unsigned int leap_nf_hook(void *priv, struct sk_buff *skb, const struct n
 // --- File Operations ---
 
 static int leap_dev_open(struct inode *inodep, struct file *filep) {
+    if (atomic_read(&open_count) > 0) return -EBUSY; // Only 1 listener allowed
+    atomic_inc(&open_count);
+    printk(KERN_INFO "LEAP: Device opened. Hook activated.\n");
     return 0;
 }
 
 static int leap_dev_release(struct inode *inodep, struct file *filep) {
+    atomic_dec(&open_count);
+    // Reset listening port for safety so we don't accidentally intercept other traffic
+    listening_port = LEAP_PORT; 
+    printk(KERN_INFO "LEAP: Device closed. Hook deactivated.\n");
     return 0;
 }
 

@@ -15,11 +15,8 @@ namespace Inference {
     }
 
     KernelTransport::~KernelTransport() {
-        if (mmap_ptr &&mmap_ptr 
-        !=
-        MAP_FAILED
-        )
-        munmap(mmap_ptr, LEAP_BUFFER_SIZE);
+        if (mmap_ptr && mmap_ptr != MAP_FAILED)
+            munmap(mmap_ptr, LEAP_BUFFER_SIZE * 2); // Unmap total size
         if (fd != -1) close(fd);
     }
 
@@ -27,9 +24,11 @@ namespace Inference {
         fd = open("/dev/leap_tensor", O_RDWR);
         if (fd < 0) throw std::runtime_error("Failed to open /dev/leap_tensor. Is the module loaded?");
 
-        // Zero-Copy Map
-        mmap_ptr = mmap(NULL, LEAP_BUFFER_SIZE, PROT_READ, MAP_SHARED, fd, 0);
-        if (mmap_ptr == MAP_FAILED) throw std::runtime_error("Failed to mmap kernel buffer");
+        // Zero-Copy Map - Map BOTH buffers (RX + TX) = 16MB
+        mmap_ptr = mmap(NULL, LEAP_BUFFER_SIZE * 2, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        if (mmap_ptr == MAP_FAILED) {
+            throw std::runtime_error(std::string("Failed to mmap kernel buffer: ") + std::strerror(errno));
+        }
 
         // Set Listening Port
         unsigned short port_short = static_cast<unsigned short>(port);
@@ -49,20 +48,33 @@ namespace Inference {
     }
 
     void KernelTransport::send(const void *data, const size_t size) {
-        // Just write to the device node. The kernel handles fragmentation and UDP sending.
-        ssize_t ret = ::write(fd, data, size);
-        if (ret < 0) throw std::runtime_error("Kernel send failed");
+        if (size > LEAP_BUFFER_SIZE) {
+            throw std::runtime_error("Send size too large for LEAP buffer (Max: " + std::to_string(LEAP_BUFFER_SIZE) + ")");
+        }
+
+        // Zero-Copy Optimization with Double Buffering:
+        // Copy to TX buffer partition (Upper 8MB)
+        // Offset = LEAP_BUFFER_SIZE
+        uint8_t* tx_buffer = static_cast<uint8_t*>(mmap_ptr) + LEAP_BUFFER_SIZE;
+        std::memcpy(tx_buffer, data, size);
+
+        // Trigger Send via IOCTL (Kernel reads from Upper 8MB)
+        unsigned int len = static_cast<unsigned int>(size);
+        if (ioctl(fd, LEAP_IOCTL_SEND, &len) < 0) {
+            throw std::runtime_error("Kernel send IOCTL failed");
+        }
     }
 
     void KernelTransport::recv(void *data, const size_t size) {
-        // Wait for data to be ready in the kernel buffer
+        // Wait for data to be ready (Kernel writes to Lower 8MB)
         if (ioctl(fd, LEAP_IOCTL_WAIT_DATA, 0) < 0) {
             throw std::runtime_error("IOCTL wait failed");
         }
 
-        // Copy from mmap buffer (Zero-Copy read from network standpoint, technically 1 copy here to dest)
-        // Optimization: In a real system, we would parse the tensor directly from mmap_ptr without copying.
         if (size > LEAP_BUFFER_SIZE) throw std::runtime_error("Recv size too large for kernel buffer");
+
+        // Read from RX buffer partition (Lower 8MB)
+        // Offset = 0
         std::memcpy(data, mmap_ptr, size);
     }
 }

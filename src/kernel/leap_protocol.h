@@ -23,16 +23,22 @@ typedef uint8_t __u8;
 #define LEAP_IOCTL_SET_DEST  _IOW(LEAP_IOCTL_MAGIC, 2, unsigned int) // Set Dest IP (u32)
 #define LEAP_IOCTL_SET_PORT  _IOW(LEAP_IOCTL_MAGIC, 3, unsigned short) // Set Listen Port (u16)
 
-// Buffer Size (64KB - enough for 4096 dim float tensor)
-#define LEAP_BUFFER_SIZE (64 * 1024)
+// Buffer Size (8MB)
+#define LEAP_BUFFER_SIZE (8 * 1024 * 1024)
 #define LEAP_CHUNK_SIZE 1400
 
 // Packet Header structure
 struct leap_header {
     __be32 magic;
     __be16 seq_id;
-    __u8 chunk_id;
-    __u8 total_chunks;
+    __be16 chunk_id;
+    __be16 total_chunks;
 } __attribute__((packed));
+
+/*
+ * Note: Standard write() is deprecated due to extra memory copy.
+ * Use mmap() + LEAP_IOCTL_SEND for zero-copy transmission.
+ */
+#define LEAP_IOCTL_SEND _IOW(LEAP_IOCTL_MAGIC, 4, unsigned int) // Trigger Send (arg = size)
 
 #endif // LEAP_PROTOCOL_H

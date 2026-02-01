@@ -43,8 +43,8 @@ namespace Inference {
     void UdpTransport::send(const void *data, const size_t size) {
         const auto *bytes = static_cast<const uint8_t *>(data);
         size_t processed = 0;
-        uint8_t total_chunks = (size + LEAP_CHUNK_SIZE - 1) / LEAP_CHUNK_SIZE;
-        uint8_t chunk_idx = 0;
+        uint16_t total_chunks = (size + LEAP_CHUNK_SIZE - 1) / LEAP_CHUNK_SIZE;
+        uint16_t chunk_idx = 0;
 
         seq_id++;
 
@@ -58,8 +58,8 @@ namespace Inference {
 
             hdr->magic = htonl(LEAP_MAGIC);
             hdr->seq_id = htons(seq_id);
-            hdr->chunk_id = chunk_idx;
-            hdr->total_chunks = total_chunks;
+            hdr->chunk_id = htons(chunk_idx);
+            hdr->total_chunks = htons(total_chunks);
 
             std::memcpy(packet.data() + sizeof(leap_header), bytes + processed, chunk_len);
 

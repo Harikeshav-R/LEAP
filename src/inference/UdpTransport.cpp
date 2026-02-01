@@ -47,8 +47,6 @@ namespace Inference {
         uint16_t chunk_idx = 0;
 
         seq_id++;
-        
-        std::cout << "UDP: Sending " << size << " bytes (Seq: " << seq_id << ", Chunks: " << total_chunks << ") to " << inet_ntoa(dest_addr.sin_addr) << std::endl;
 
         while (processed < size) {
             size_t chunk_len = LEAP_CHUNK_SIZE;

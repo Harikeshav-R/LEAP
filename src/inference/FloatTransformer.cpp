@@ -366,74 +366,72 @@ namespace Inference {
 
     void FloatTransformer::run_layer(int l, int pos, float *x) {
         const Config *p = &config;
+        const int kv_dim = (p->dim * p->n_kv_heads) / p->n_heads;
+        const int loff = l * p->seq_len * kv_dim;
+
+        attention_block(l, pos, x, loff);
+        feed_forward_block(l, x);
+    }
+
+    void FloatTransformer::attention_block(int l, int pos, float *x, int loff) {
+        const Config *p = &config;
         const FloatTransformerWeights *w = &weights;
         FloatRunState *s = &state;
         const int dim = p->dim;
         const int kv_dim = (p->dim * p->n_kv_heads) / p->n_heads;
         const int kv_mul = p->n_heads / p->n_kv_heads;
-        const int hidden_dim = p->hidden_dim;
         const int head_size = dim / p->n_heads;
 
+        // 1. RMSNorm
         rmsnorm(s->xb.data(), x, w->rms_att_weight + l * dim, dim);
 
-        const int loff = l * p->seq_len * kv_dim;
-        float *k = s->key_cache.data() + loff + pos * kv_dim;
-        float *v = s->value_cache.data() + loff + pos * kv_dim;
+        // 2. QKV MatMuls
+        float *k_curr = s->key_cache.data() + loff + pos * kv_dim;
+        float *v_curr = s->value_cache.data() + loff + pos * kv_dim;
 
         matmul(s->q.data(), s->xb.data(), w->wq + l * dim * dim, dim, dim);
-        matmul(k, s->xb.data(), w->wk + l * dim * kv_dim, dim, kv_dim);
-        matmul(v, s->xb.data(), w->wv + l * dim * kv_dim, dim, kv_dim);
+        matmul(k_curr, s->xb.data(), w->wk + l * dim * kv_dim, dim, kv_dim);
+        matmul(v_curr, s->xb.data(), w->wv + l * dim * kv_dim, dim, kv_dim);
 
-        // RoPE
+        // 3. RoPE
         const int rope_offset = pos * (head_size / 2);
         for (int i = 0; i < p->n_heads; i++) {
             int j = 0;
 #if defined(__ARM_NEON)
             for (; j <= head_size - 4; j += 4) {
-                // Load 4 floats: [q0, q1, q2, q3] -> 2 pairs (q0,q1), (q2,q3)
                 float32x4_t q_vec = vld1q_f32(s->q.data() + i * head_size + j);
-
                 float c0 = rope_cos[rope_offset + j / 2];
                 float c1 = rope_cos[rope_offset + j / 2 + 1];
                 float s0 = rope_sin[rope_offset + j / 2];
                 float s1 = rope_sin[rope_offset + j / 2 + 1];
 
-                // Construct vectors: [c0, c0, c1, c1]
                 float32x4_t c_vec = {c0, c0, c1, c1};
                 float32x4_t s_vec = {s0, s0, s1, s1};
-
-                // Step 1: Compute q * c
-                float32x4_t term1 = vmulq_f32(q_vec, c_vec);
-
-                // Step 2: Swap q to get [q1, q0, q3, q2]
-                float32x4_t q_swap = vrev64q_f32(q_vec);
-
-                // Step 3: Compute swapped_q * s
-                // Multiply q_swap by [-s0, s0, -s1, s1].
                 float32x4_t s_signed = {-s0, s0, -s1, s1};
-                float32x4_t term2 = vmulq_f32(q_swap, s_signed);
 
+                float32x4_t term1 = vmulq_f32(q_vec, c_vec);
+                float32x4_t q_swap = vrev64q_f32(q_vec);
+                float32x4_t term2 = vmulq_f32(q_swap, s_signed);
                 float32x4_t res = vaddq_f32(term1, term2);
                 vst1q_f32(s->q.data() + i * head_size + j, res);
 
                 if (i < p->n_kv_heads) {
-                    float32x4_t k_vec = vld1q_f32(k + i * head_size + j);
+                    float32x4_t k_vec = vld1q_f32(k_curr + i * head_size + j);
                     float32x4_t k_term1 = vmulq_f32(k_vec, c_vec);
                     float32x4_t k_swap = vrev64q_f32(k_vec);
                     float32x4_t k_term2 = vmulq_f32(k_swap, s_signed);
                     float32x4_t k_res = vaddq_f32(k_term1, k_term2);
-                    vst1q_f32(k + i * head_size + j, k_res);
+                    vst1q_f32(k_curr + i * head_size + j, k_res);
                 }
             }
 #elif defined(__AVX2__)
             for (; j <= head_size - 8; j += 8) {
                 __m256 q_vec = _mm256_loadu_ps(s->q.data() + i * head_size + j);
-
                 __m128 c_small = _mm_loadu_ps(&rope_cos[rope_offset + j / 2]);
                 __m128 s_small = _mm_loadu_ps(&rope_sin[rope_offset + j / 2]);
 
-                __m128 c_lo = _mm_unpacklo_ps(c_small, c_small); // c0, c0, c1, c1
-                __m128 c_hi = _mm_unpackhi_ps(c_small, c_small); // c2, c2, c3, c3
+                __m128 c_lo = _mm_unpacklo_ps(c_small, c_small);
+                __m128 c_hi = _mm_unpackhi_ps(c_small, c_small);
                 __m256 c_vec = _mm256_insertf128_ps(_mm256_castps128_ps256(c_lo), c_hi, 1);
 
                 __m128 s_lo = _mm_unpacklo_ps(s_small, s_small);
@@ -448,12 +446,12 @@ namespace Inference {
                 _mm256_storeu_ps(s->q.data() + i * head_size + j, res);
 
                 if (i < p->n_kv_heads) {
-                    __m256 k_vec = _mm256_loadu_ps(k + i * head_size + j);
+                    __m256 k_vec = _mm256_loadu_ps(k_curr + i * head_size + j);
                     __m256 k_swap = _mm256_permute_ps(k_vec, _MM_SHUFFLE(2, 3, 0, 1));
                     __m256 k_t1 = _mm256_mul_ps(k_vec, c_vec);
                     __m256 k_t2 = _mm256_mul_ps(k_swap, s_vec);
                     __m256 k_res = _mm256_addsub_ps(k_t1, k_t2);
-                    _mm256_storeu_ps(k + i * head_size + j, k_res);
+                    _mm256_storeu_ps(k_curr + i * head_size + j, k_res);
                 }
             }
 #endif
@@ -467,14 +465,15 @@ namespace Inference {
                 s->q[i * head_size + j + 1] = q0 * fci + q1 * fcr;
 
                 if (i < p->n_kv_heads) {
-                    const float k0 = k[i * head_size + j];
-                    const float k1 = k[i * head_size + j + 1];
-                    k[i * head_size + j] = k0 * fcr - k1 * fci;
-                    k[i * head_size + j + 1] = k0 * fci + k1 * fcr;
+                    const float k0 = k_curr[i * head_size + j];
+                    const float k1 = k_curr[i * head_size + j + 1];
+                    k_curr[i * head_size + j] = k0 * fcr - k1 * fci;
+                    k_curr[i * head_size + j + 1] = k0 * fci + k1 * fcr;
                 }
             }
         }
 
+        // 4. Multi-Head Attention
         int h;
 #pragma omp parallel for private(h)
         for (h = 0; h < p->n_heads; h++) {
@@ -482,38 +481,27 @@ namespace Inference {
             float *att = s->att.data() + h * p->seq_len;
             int t = 0;
 
-            // Unrolled loop for t
+            // Attention Scores
             for (; t <= pos - 4; t += 4) {
                 const float *k0 = s->key_cache.data() + loff + t * kv_dim + (h / kv_mul) * head_size;
                 const float *k1 = s->key_cache.data() + loff + (t + 1) * kv_dim + (h / kv_mul) * head_size;
                 const float *k2 = s->key_cache.data() + loff + (t + 2) * kv_dim + (h / kv_mul) * head_size;
                 const float *k3 = s->key_cache.data() + loff + (t + 3) * kv_dim + (h / kv_mul) * head_size;
 
-                float s0 = 0.0f;
-                float s1 = 0.0f;
-                float s2 = 0.0f;
-                float s3 = 0.0f;
-
+                float s0 = 0.0f, s1 = 0.0f, s2 = 0.0f, s3 = 0.0f;
                 int i = 0;
 #if defined(__AVX2__)
                 __m256 sum0 = _mm256_setzero_ps();
                 __m256 sum1 = _mm256_setzero_ps();
                 __m256 sum2 = _mm256_setzero_ps();
                 __m256 sum3 = _mm256_setzero_ps();
-
                 for (; i <= head_size - 8; i += 8) {
                     __m256 q_vec = _mm256_loadu_ps(q + i);
-                    __m256 k0_vec = _mm256_loadu_ps(k0 + i);
-                    __m256 k1_vec = _mm256_loadu_ps(k1 + i);
-                    __m256 k2_vec = _mm256_loadu_ps(k2 + i);
-                    __m256 k3_vec = _mm256_loadu_ps(k3 + i);
-
-                    sum0 = _mm256_fmadd_ps(q_vec, k0_vec, sum0);
-                    sum1 = _mm256_fmadd_ps(q_vec, k1_vec, sum1);
-                    sum2 = _mm256_fmadd_ps(q_vec, k2_vec, sum2);
-                    sum3 = _mm256_fmadd_ps(q_vec, k3_vec, sum3);
+                    sum0 = _mm256_fmadd_ps(q_vec, _mm256_loadu_ps(k0 + i), sum0);
+                    sum1 = _mm256_fmadd_ps(q_vec, _mm256_loadu_ps(k1 + i), sum1);
+                    sum2 = _mm256_fmadd_ps(q_vec, _mm256_loadu_ps(k2 + i), sum2);
+                    sum3 = _mm256_fmadd_ps(q_vec, _mm256_loadu_ps(k3 + i), sum3);
                 }
-
                 auto hsum = [](__m256 v) {
                     __m128 lo = _mm256_castps256_ps128(v);
                     __m128 hi = _mm256_extractf128_ps(v, 1);
@@ -521,71 +509,45 @@ namespace Inference {
                     lo = _mm_hadd_ps(lo, lo);
                     return _mm_cvtss_f32(_mm_hadd_ps(lo, lo));
                 };
-                s0 = hsum(sum0);
-                s1 = hsum(sum1);
-                s2 = hsum(sum2);
-                s3 = hsum(sum3);
+                s0 = hsum(sum0); s1 = hsum(sum1); s2 = hsum(sum2); s3 = hsum(sum3);
 #elif defined(__ARM_NEON)
                 float32x4_t sum0_v = vdupq_n_f32(0.0f);
                 float32x4_t sum1_v = vdupq_n_f32(0.0f);
                 float32x4_t sum2_v = vdupq_n_f32(0.0f);
                 float32x4_t sum3_v = vdupq_n_f32(0.0f);
-
                 for (; i <= head_size - 4; i += 4) {
                     float32x4_t q_vec = vld1q_f32(q + i);
-                    float32x4_t k0_vec = vld1q_f32(k0 + i);
-                    float32x4_t k1_vec = vld1q_f32(k1 + i);
-                    float32x4_t k2_vec = vld1q_f32(k2 + i);
-                    float32x4_t k3_vec = vld1q_f32(k3 + i);
-
-                    sum0_v = vmlaq_f32(sum0_v, q_vec, k0_vec);
-                    sum1_v = vmlaq_f32(sum1_v, q_vec, k1_vec);
-                    sum2_v = vmlaq_f32(sum2_v, q_vec, k2_vec);
-                    sum3_v = vmlaq_f32(sum3_v, q_vec, k3_vec);
+                    sum0_v = vmlaq_f32(sum0_v, q_vec, vld1q_f32(k0 + i));
+                    sum1_v = vmlaq_f32(sum1_v, q_vec, vld1q_f32(k1 + i));
+                    sum2_v = vmlaq_f32(sum2_v, q_vec, vld1q_f32(k2 + i));
+                    sum3_v = vmlaq_f32(sum3_v, q_vec, vld1q_f32(k3 + i));
                 }
-                s0 = vaddvq_f32(sum0_v);
-                s1 = vaddvq_f32(sum1_v);
-                s2 = vaddvq_f32(sum2_v);
-                s3 = vaddvq_f32(sum3_v);
+                s0 = vaddvq_f32(sum0_v); s1 = vaddvq_f32(sum1_v);
+                s2 = vaddvq_f32(sum2_v); s3 = vaddvq_f32(sum3_v);
 #endif
                 for (; i < head_size; i++) {
                     float qv = q[i];
-                    s0 += qv * k0[i];
-                    s1 += qv * k1[i];
-                    s2 += qv * k2[i];
-                    s3 += qv * k3[i];
+                    s0 += qv * k0[i]; s1 += qv * k1[i]; s2 += qv * k2[i]; s3 += qv * k3[i];
                 }
-
                 float scale = 1.0f / std::sqrt(static_cast<float>(head_size));
-                att[t] = s0 * scale;
-                att[t + 1] = s1 * scale;
-                att[t + 2] = s2 * scale;
-                att[t + 3] = s3 * scale;
+                att[t] = s0 * scale; att[t + 1] = s1 * scale; att[t + 2] = s2 * scale; att[t + 3] = s3 * scale;
             }
 
-            // Tail loop
             for (; t <= pos; t++) {
                 const float *k_ptr = s->key_cache.data() + loff + t * kv_dim + (h / kv_mul) * head_size;
-
-                // Dot product for attention score
                 float score = 0.0f;
                 int i = 0;
 #if defined(__ARM_NEON)
                 float32x4_t sum_vec = vdupq_n_f32(0.0f);
                 for (; i <= head_size - 4; i += 4) {
-                    float32x4_t q_vec = vld1q_f32(q + i);
-                    float32x4_t k_vec = vld1q_f32(k_ptr + i);
-                    sum_vec = vmlaq_f32(sum_vec, q_vec, k_vec);
+                    sum_vec = vmlaq_f32(sum_vec, vld1q_f32(q + i), vld1q_f32(k_ptr + i));
                 }
                 score = vaddvq_f32(sum_vec);
 #elif defined(__AVX2__)
                 __m256 sum_vec = _mm256_setzero_ps();
                 for (; i <= head_size - 8; i += 8) {
-                    __m256 q_vec = _mm256_loadu_ps(q + i);
-                    __m256 k_vec = _mm256_loadu_ps(k_ptr + i);
-                    sum_vec = _mm256_fmadd_ps(q_vec, k_vec, sum_vec);
+                    sum_vec = _mm256_fmadd_ps(_mm256_loadu_ps(q + i), _mm256_loadu_ps(k_ptr + i), sum_vec);
                 }
-                // Horizontal sum
                 auto hsum = [](__m256 v) {
                     __m128 lo = _mm256_castps256_ps128(v);
                     __m128 hi = _mm256_extractf128_ps(v, 1);
@@ -595,15 +557,13 @@ namespace Inference {
                 };
                 score = hsum(sum_vec);
 #endif
-                for (; i < head_size; i++) {
-                    score += q[i] * k_ptr[i];
-                }
-                score /= std::sqrt(static_cast<float>(head_size));
-                att[t] = score;
+                for (; i < head_size; i++) score += q[i] * k_ptr[i];
+                att[t] = score / std::sqrt(static_cast<float>(head_size));
             }
 
             softmax(att, pos + 1);
 
+            // Weighted Sum
             float *xb = s->xb.data() + h * head_size;
             std::fill_n(xb, head_size, 0.0f);
 
@@ -615,36 +575,41 @@ namespace Inference {
                 float32x4_t a_vec = vdupq_n_f32(a);
                 for (; i <= head_size - 4; i += 4) {
                     float32x4_t xb_vec = vld1q_f32(xb + i);
-                    float32x4_t v_vec = vld1q_f32(v_ptr + i);
-                    xb_vec = vmlaq_f32(xb_vec, a_vec, v_vec);
-                    vst1q_f32(xb + i, xb_vec);
+                    vst1q_f32(xb + i, vmlaq_f32(xb_vec, a_vec, vld1q_f32(v_ptr + i)));
                 }
 #elif defined(__AVX2__)
                 __m256 a_vec = _mm256_set1_ps(a);
                 for (; i <= head_size - 8; i += 8) {
                     __m256 xb_vec = _mm256_loadu_ps(xb + i);
-                    __m256 v_vec = _mm256_loadu_ps(v_ptr + i);
-                    xb_vec = _mm256_fmadd_ps(a_vec, v_vec, xb_vec);
-                    _mm256_storeu_ps(xb + i, xb_vec);
+                    _mm256_storeu_ps(xb + i, _mm256_fmadd_ps(a_vec, _mm256_loadu_ps(v_ptr + i), xb_vec));
                 }
 #endif
-                for (; i < head_size; i++) {
-                    xb[i] += a * v_ptr[i];
-                }
+                for (; i < head_size; i++) xb[i] += a * v_ptr[i];
             }
         }
 
+        // 5. Output Projection
         matmul(s->xb2.data(), s->xb.data(), w->wo + l * dim * dim, dim, dim);
 
-        for (int i = 0; i < dim; i++) {
-            x[i] += s->xb2[i];
-        }
+        // 6. Residual Add
+        for (int i = 0; i < dim; i++) x[i] += s->xb2[i];
+    }
 
+    void FloatTransformer::feed_forward_block(int l, float *x) {
+        const Config *p = &config;
+        const FloatTransformerWeights *w = &weights;
+        FloatRunState *s = &state;
+        const int dim = p->dim;
+        const int hidden_dim = p->hidden_dim;
+
+        // 1. RMSNorm
         rmsnorm(s->xb.data(), x, w->rms_ffn_weight + l * dim, dim);
 
+        // 2. W1 (Gate) and W3 (Up)
         matmul(s->hb.data(), s->xb.data(), w->w1 + l * dim * hidden_dim, dim, hidden_dim);
         matmul(s->hb2.data(), s->xb.data(), w->w3 + l * dim * hidden_dim, dim, hidden_dim);
 
+        // 3. SiLU
 #pragma omp parallel for simd
         for (int i = 0; i < hidden_dim; i++) {
             float val = s->hb[i];
@@ -653,11 +618,11 @@ namespace Inference {
             s->hb[i] = val;
         }
 
+        // 4. W2 (Down)
         matmul(s->xb.data(), s->hb.data(), w->w2 + l * dim * hidden_dim, hidden_dim, dim);
 
-        for (int i = 0; i < dim; i++) {
-            x[i] += s->xb[i];
-        }
+        // 5. Residual Add
+        for (int i = 0; i < dim; i++) x[i] += s->xb[i];
     }
 
     float *FloatTransformer::forward(const int token, const int pos) {

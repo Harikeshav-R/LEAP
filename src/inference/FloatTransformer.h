@@ -66,6 +66,10 @@ namespace Inference {
 
         void run_layer(int l, int pos, float *x);
 
+        void attention_block(int l, int pos, float *x, int loff);
+
+        void feed_forward_block(int l, float *x);
+
         static void rmsnorm(float *o, const float *x, const float *weight, int size);
 
         static void softmax(float *x, int size);

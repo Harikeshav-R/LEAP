@@ -131,15 +131,24 @@ static unsigned int leap_nf_hook(void *priv, struct sk_buff *skb, const struct n
     iph = ip_hdr(skb);
     lhdr = (struct leap_header *) ((unsigned char *) iph + payload_offset);
 
-    if (unlikely(lhdr->magic != cpu_to_be32(LEAP_MAGIC))) return NF_ACCEPT;
+    if (unlikely(lhdr->magic != cpu_to_be32(LEAP_MAGIC))) {
+        if (printk_ratelimit()) printk(KERN_WARNING "LEAP: Bad Magic. Got: %x, Expected: %x\n", ntohl(lhdr->magic), LEAP_MAGIC);
+        return NF_ACCEPT;
+    }
 
     uint16_t chunk_id = ntohs(lhdr->chunk_id);
     uint16_t total_chunks = ntohs(lhdr->total_chunks);
     uint16_t seq_id = ntohs(lhdr->seq_id);
 
-    if (unlikely(total_chunks == 0 || chunk_id >= total_chunks)) return NF_ACCEPT;
+    if (unlikely(total_chunks == 0 || chunk_id >= total_chunks)) {
+        if (printk_ratelimit()) printk(KERN_WARNING "LEAP: Invalid Chunks. Chunk: %d, Total: %d\n", chunk_id, total_chunks);
+        return NF_ACCEPT;
+    }
 
-    if (dest_port != udph->source) dest_port = udph->source;
+    if (dest_port != udph->source) {
+        printk(KERN_INFO "LEAP: Updating dest_port to %d (was %d)\n", ntohs(udph->source), ntohs(dest_port));
+        dest_port = udph->source;
+    }
 
     leap_offset = chunk_id * LEAP_CHUNK_SIZE;
     int data_len = payload_len - sizeof(struct leap_header);
@@ -148,10 +157,12 @@ static unsigned int leap_nf_hook(void *priv, struct sk_buff *skb, const struct n
     spin_lock(&rx_lock);
     int16_t diff = (int16_t)(seq_id - active_seq_id);
     if (diff > 0) {
+        printk(KERN_INFO "LEAP: New Sequence ID: %d (Old: %d)\n", seq_id, active_seq_id);
         active_seq_id = seq_id;
         atomic_set(&chunks_received, 0);
     } else if (diff < 0) {
         spin_unlock(&rx_lock);
+        if (printk_ratelimit()) printk(KERN_WARNING "LEAP: Old Sequence ID: %d (Active: %d)\n", seq_id, active_seq_id);
         return NF_ACCEPT;
     }
     spin_unlock(&rx_lock);
@@ -164,10 +175,16 @@ static unsigned int leap_nf_hook(void *priv, struct sk_buff *skb, const struct n
 
         if (skb_copy_bits(skb, abs_offset, leap_buffer + leap_offset, data_len) < 0) return NF_ACCEPT;
 
-        if (atomic_inc_return(&chunks_received) == total_chunks) {
+        int received = atomic_inc_return(&chunks_received);
+        // printk(KERN_INFO "LEAP: Received Chunk %d/%d (Seq: %d)\n", chunk_id, total_chunks, seq_id);
+        
+        if (received == total_chunks) {
+            printk(KERN_INFO "LEAP: Frame Complete (Seq: %d). Waking userspace.\n", seq_id);
             atomic_set(&data_ready, 1);
             wake_up_interruptible(&leap_wait_queue);
         }
+    } else {
+        printk(KERN_ERR "LEAP: Buffer Overflow! Offset: %d, Len: %d, Max: %lu\n", leap_offset, data_len, leap_buffer_size);
     }
 
     consume_skb(skb);
@@ -195,6 +212,8 @@ static ssize_t leap_dev_write(struct file *filep, const char __user *buffer, siz
     if (len > leap_buffer_size) return -EMSGSIZE;
     if (!tx_socket) return -EIO;
 
+    // printk(KERN_INFO "LEAP: Write called. Len: %lu\n", len);
+
     total_chunks = (len + LEAP_CHUNK_SIZE - 1) / LEAP_CHUNK_SIZE;
     kbuf = vmalloc(len);
     if (!kbuf) return -ENOMEM;
@@ -207,7 +226,10 @@ static ssize_t leap_dev_write(struct file *filep, const char __user *buffer, siz
     uint16_t current_seq = (uint16_t)atomic_inc_return(&global_seq_id);
     while (processed < len) {
         size_t chunk_len = (processed + LEAP_CHUNK_SIZE > len) ? (len - processed) : LEAP_CHUNK_SIZE;
-        send_udp_chunk(kbuf + processed, chunk_len, current_seq, chunk_idx++, total_chunks);
+        int ret = send_udp_chunk(kbuf + processed, chunk_len, current_seq, chunk_idx++, total_chunks);
+        if (ret < 0) {
+             printk(KERN_ERR "LEAP: Send failed at chunk %d. Ret: %d\n", chunk_idx-1, ret);
+        }
         processed += chunk_len;
         cond_resched();
     }

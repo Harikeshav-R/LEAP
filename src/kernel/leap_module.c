@@ -31,6 +31,9 @@ static struct cdev leap_cdev;
 // Memory Buffer (16MB Total: Lower 8MB RX, Upper 8MB TX)
 static void *leap_buffer = NULL;
 static unsigned long leap_buffer_size = LEAP_BUFFER_SIZE;
+module_param(leap_buffer_size, ulong, 0444);
+MODULE_PARM_DESC(leap_buffer_size, "Size of the RX/TX buffer (default 8MB). Total allocation will be 2x this value.");
+
 static unsigned long total_alloc_size; // 2 * LEAP_BUFFER_SIZE
 
 // Synchronization
@@ -38,10 +41,17 @@ static DECLARE_WAIT_QUEUE_HEAD (leap_wait_queue);
 static atomic_t data_ready = ATOMIC_INIT(0);
 static atomic_t open_count = ATOMIC_INIT(0);
 
+// Module Parameters
+static int busy_wait_limit = 5000;
+module_param(busy_wait_limit, int, 0644);
+MODULE_PARM_DESC(busy_wait_limit, "Number of iterations to busy-wait for data before sleeping");
+
 // RX State
 static spinlock_t rx_lock;
 static uint16_t active_seq_id = 0;
 static atomic_t chunks_received = ATOMIC_INIT(0);
+static unsigned int max_chunks;
+static unsigned long *rx_bitmap = NULL;
 
 // Networking (TX)
 static struct socket *tx_socket = NULL;
@@ -96,7 +106,8 @@ static int send_udp_chunk(void *data, size_t len, uint16_t seq, uint16_t chunk, 
     ret = kernel_sendmsg(tx_socket, &msg, vec, 2, sizeof(hdr) + len);
     if (unlikely(ret < 0)) {
         if (printk_ratelimit())
-            printk(KERN_ERR "LEAP: TX Failed! Error: %d\n", ret);
+            printk(KERN_ERR "LEAP: TX Failed! Error: %d. Dest: %pI4:%d\n", 
+                   ret, &dest_addr.sin_addr.s_addr, ntohs(dest_addr.sin_port));
     }
     return ret;
 }
@@ -137,7 +148,7 @@ static unsigned int leap_nf_hook(void *priv, struct sk_buff *skb, const struct n
     uint16_t total_chunks = ntohs(lhdr->total_chunks);
     uint16_t seq_id = ntohs(lhdr->seq_id);
 
-    if (unlikely(total_chunks == 0 || chunk_id >= total_chunks)) return NF_ACCEPT;
+    if (unlikely(total_chunks == 0 || total_chunks > max_chunks || chunk_id >= total_chunks)) return NF_ACCEPT;
 
     if (dest_port != udph->source) dest_port = udph->source;
 
@@ -145,11 +156,14 @@ static unsigned int leap_nf_hook(void *priv, struct sk_buff *skb, const struct n
     int data_len = payload_len - sizeof(struct leap_header);
     if (unlikely(data_len < 0)) return NF_ACCEPT;
 
+    // Preliminary sequence check
     spin_lock(&rx_lock);
     int16_t diff = (int16_t)(seq_id - active_seq_id);
     if (diff > 0) {
         active_seq_id = seq_id;
         atomic_set(&chunks_received, 0);
+        // Reset bitmap for new sequence
+        bitmap_zero(rx_bitmap, max_chunks);
     } else if (diff < 0) {
         spin_unlock(&rx_lock);
         return NF_ACCEPT;
@@ -164,10 +178,18 @@ static unsigned int leap_nf_hook(void *priv, struct sk_buff *skb, const struct n
 
         if (skb_copy_bits(skb, abs_offset, leap_buffer + leap_offset, data_len) < 0) return NF_ACCEPT;
 
-        if (atomic_inc_return(&chunks_received) == total_chunks) {
-            atomic_set(&data_ready, 1);
-            wake_up_interruptible(&leap_wait_queue);
+        spin_lock(&rx_lock);
+        // Verify sequence is still active
+        if (seq_id == active_seq_id) {
+            // Only increment if this chunk wasn't already received
+            if (!test_and_set_bit(chunk_id, rx_bitmap)) {
+                if (atomic_inc_return(&chunks_received) == total_chunks) {
+                    atomic_set(&data_ready, 1);
+                    wake_up_interruptible(&leap_wait_queue);
+                }
+            }
         }
+        spin_unlock(&rx_lock);
     }
 
     consume_skb(skb);
@@ -177,17 +199,34 @@ static unsigned int leap_nf_hook(void *priv, struct sk_buff *skb, const struct n
 static int leap_dev_open(struct inode *inodep, struct file *filep) {
     if (atomic_read(&open_count) > 0) return -EBUSY;
     atomic_inc(&open_count);
-    pr_alert("LEAP: Device opened by PID %d\n", current->pid);
+    pr_info("LEAP: Device opened by PID %d\n", current->pid);
     return 0;
 }
 
 static int leap_dev_release(struct inode *inodep, struct file *filep) {
     atomic_dec(&open_count);
     listening_port = htons(LEAP_PORT);
+    dest_ip = 0;
+    dest_port = htons(LEAP_PORT);
+
+    // Reset RX State
+    spin_lock_bh(&rx_lock);
+    active_seq_id = 0;
+    atomic_set(&chunks_received, 0);
+    if (rx_bitmap) bitmap_zero(rx_bitmap, max_chunks);
+    spin_unlock_bh(&rx_lock);
+
     return 0;
 }
 
 static ssize_t leap_dev_write(struct file *filep, const char __user *buffer, size_t len, loff_t *offset) {
+    /*
+     * DEPRECATED: This write path allocates a temporary vmalloc buffer and performs
+     * a copy_from_user, which is inefficient compared to the mmap approach.
+     * Prefer using the mmap buffer + LEAP_IOCTL_SEND for better performance.
+     */
+    pr_warn_once("LEAP: write() is deprecated. Use mmap + LEAP_IOCTL_SEND for zero-copy TX.\n");
+
     size_t processed = 0;
     uint16_t total_chunks, chunk_idx = 0;
     void *kbuf;
@@ -218,21 +257,19 @@ static ssize_t leap_dev_write(struct file *filep, const char __user *buffer, siz
 static long leap_dev_ioctl(struct file *filep, unsigned int cmd, unsigned long arg) {
     if (cmd == LEAP_IOCTL_WAIT_DATA) {
         int i;
-        for (i = 0; i < 5000; i++) {
-            if (atomic_read(&data_ready) != 0) {
-                atomic_set(&data_ready, 0);
+        for (i = 0; i < busy_wait_limit; i++) {
+            if (atomic_xchg(&data_ready, 0) != 0) {
                 return 0;
             }
             cpu_relax();
         }
-        if (wait_event_interruptible(leap_wait_queue, atomic_read(&data_ready) != 0)) return -ERESTARTSYS;
-        atomic_set(&data_ready, 0);
+        if (wait_event_interruptible(leap_wait_queue, atomic_xchg(&data_ready, 0) != 0)) return -ERESTARTSYS;
         return 0;
     } else if (cmd == LEAP_IOCTL_SET_DEST) {
         if (copy_from_user(&dest_ip, (unsigned int __user *)arg, sizeof(dest_ip))) return -EFAULT;
         memset(&dest_addr, 0, sizeof(dest_addr));
         dest_addr.sin_family = AF_INET;
-        dest_addr.sin_port = htons(LEAP_PORT);
+        dest_addr.sin_port = dest_port;
         dest_addr.sin_addr.s_addr = dest_ip;
         return 0;
     } else if (cmd == LEAP_IOCTL_SET_PORT) {
@@ -254,6 +291,14 @@ static long leap_dev_ioctl(struct file *filep, unsigned int cmd, unsigned long a
 
         while (processed < data_len) {
             size_t chunk_len = (processed + LEAP_CHUNK_SIZE > data_len) ? (data_len - processed) : LEAP_CHUNK_SIZE;
+
+            // Explicit bounds check to prevent overflow
+            if (unlikely(processed + chunk_len > leap_buffer_size)) {
+                pr_err("LEAP: Buffer overflow detected in IOCTL_SEND! processed=%zu, chunk=%zu, max=%lu\n", 
+                       processed, chunk_len, leap_buffer_size);
+                return -EFAULT;
+            }
+
             send_udp_chunk(tx_buffer_start + processed, chunk_len, current_seq, chunk_idx++, total_chunks);
             processed += chunk_len;
             cond_resched();
@@ -270,10 +315,10 @@ static int leap_dev_mmap(struct file *filp, struct vm_area_struct *vma) {
     struct page *page;
     int ret;
 
-    pr_alert("LEAP: mmap called (manual). Size: %lu\n", size);
+    pr_info("LEAP: mmap called (manual). Size: %lu\n", size);
 
     if (size > total_alloc_size) {
-        pr_alert("LEAP: mmap failed! Request too large.\n");
+        pr_err("LEAP: mmap failed! Request too large.\n");
         return -EINVAL;
     }
 
@@ -283,30 +328,57 @@ static int leap_dev_mmap(struct file *filp, struct vm_area_struct *vma) {
     for (pos = 0; pos < size; pos += PAGE_SIZE) {
         page = vmalloc_to_page(leap_buffer + pos);
         if (!page) {
-            pr_alert("LEAP: vmalloc_to_page failed at offset %lu\n", pos);
-            return -EFAULT;
+            pr_err("LEAP: vmalloc_to_page failed at offset %lu\n", pos);
+            ret = -EFAULT;
+            goto err_unmap;
         }
 
         ret = vm_insert_page(vma, start + pos, page);
         if (ret < 0) {
-            pr_alert("LEAP: vm_insert_page failed at offset %lu, error %d\n", pos, ret);
-            return ret;
+            pr_err("LEAP: vm_insert_page failed at offset %lu, error %d\n", pos, ret);
+            goto err_unmap;
         }
     }
     
     return 0;
+
+err_unmap:
+    if (pos > 0)
+        zap_vma_ptes(vma, start, pos);
+    return ret;
 }
 
 static int __init leap_init(void) {
     int ret;
     dev_t dev_no;
     
-    pr_alert("LEAP: Initializing module v0.5 (Double Buffered 16MB)\n");
+    pr_info("LEAP: Initializing module v0.5 (Double Buffered 16MB)\n");
 
+    // Sanity check for buffer size
+    if (leap_buffer_size < LEAP_CHUNK_SIZE || leap_buffer_size > (128 * 1024 * 1024)) {
+        pr_err("LEAP: Invalid leap_buffer_size: %lu\n", leap_buffer_size);
+        return -EINVAL;
+    }
+
+    max_chunks = (leap_buffer_size + LEAP_CHUNK_SIZE - 1) / LEAP_CHUNK_SIZE;
     total_alloc_size = leap_buffer_size * 2;
+
+    /*
+     * Large contiguous memory allocation risk:
+     * vmalloc is used for the 2 * leap_buffer_size allocation. 
+     * On highly fragmented systems, this may fail.
+     */
     leap_buffer = vmalloc(total_alloc_size);
     if (!leap_buffer) return -ENOMEM;
     memset(leap_buffer, 0, total_alloc_size);
+
+    // Allocate RX Bitmap
+    rx_bitmap = bitmap_zalloc(max_chunks, GFP_KERNEL);
+    if (!rx_bitmap) {
+        vfree(leap_buffer);
+        return -ENOMEM;
+    }
+
     spin_lock_init(&rx_lock);
 
     ret = alloc_chrdev_region(&dev_no, 0, 1, LEAP_DEVICE_NAME);
@@ -317,15 +389,18 @@ static int __init leap_init(void) {
     leap_device = device_create(leap_class, NULL, dev_no, NULL, LEAP_DEVICE_NAME);
     if (IS_ERR(leap_device)) { ret = PTR_ERR(leap_device); goto err_class; }
     cdev_init(&leap_cdev, &fops);
-    if (cdev_add(&leap_cdev, dev_no, 1) < 0) goto err_device;
+    ret = cdev_add(&leap_cdev, dev_no, 1);
+    if (ret < 0) goto err_device;
 
     leap_nf_ops.hook = leap_nf_hook;
     leap_nf_ops.pf = PF_INET;
     leap_nf_ops.hooknum = NF_INET_PRE_ROUTING;
     leap_nf_ops.priority = NF_IP_PRI_FIRST;
-    if (nf_register_net_hook(&init_net, &leap_nf_ops) < 0) goto err_cdev;
+    ret = nf_register_net_hook(&init_net, &leap_nf_ops);
+    if (ret < 0) goto err_cdev;
 
-    if (sock_create_kern(&init_net, PF_INET, SOCK_DGRAM, IPPROTO_UDP, &tx_socket) < 0) goto err_nf;
+    ret = sock_create_kern(&init_net, PF_INET, SOCK_DGRAM, IPPROTO_UDP, &tx_socket);
+    if (ret < 0) goto err_nf;
     
     // Optimization: Disable UDP Checksums for performance
     if (tx_socket->sk) {
@@ -339,7 +414,9 @@ err_cdev: cdev_del(&leap_cdev);
 err_device: device_destroy(leap_class, dev_no);
 err_class: class_destroy(leap_class);
 err_chrdev: unregister_chrdev_region(dev_no, 1);
-err_buffer: vfree(leap_buffer);
+err_buffer: 
+    bitmap_free(rx_bitmap);
+    vfree(leap_buffer);
     return ret;
 }
 
@@ -351,6 +428,7 @@ static void __exit leap_exit(void) {
     device_destroy(leap_class, dev_no);
     class_destroy(leap_class);
     unregister_chrdev_region(dev_no, 1);
+    bitmap_free(rx_bitmap);
     vfree(leap_buffer);
 }
 

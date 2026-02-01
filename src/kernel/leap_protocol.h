@@ -35,6 +35,10 @@ struct leap_header {
     __be16 total_chunks;
 } __attribute__((packed));
 
+/*
+ * Note: Standard write() is deprecated due to extra memory copy.
+ * Use mmap() + LEAP_IOCTL_SEND for zero-copy transmission.
+ */
 #define LEAP_IOCTL_SEND _IOW(LEAP_IOCTL_MAGIC, 4, unsigned int) // Trigger Send (arg = size)
 
 #endif // LEAP_PROTOCOL_H

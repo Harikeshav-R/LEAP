@@ -72,7 +72,7 @@ namespace Inference {
         }
 
         if (size > LEAP_BUFFER_SIZE) throw std::runtime_error("Recv size too large for kernel buffer");
-        
+
         // Read from RX buffer partition (Lower 8MB)
         // Offset = 0
         std::memcpy(data, mmap_ptr, size);

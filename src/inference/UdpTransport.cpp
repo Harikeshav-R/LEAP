@@ -24,18 +24,23 @@ namespace Inference {
         sockfd = socket(AF_INET, SOCK_DGRAM, 0);
         if (sockfd < 0) throw std::runtime_error("Socket creation failed");
 
-        if (is_server) {
-            sockaddr_in bind_addr{};
-            bind_addr.sin_family = AF_INET;
-            bind_addr.sin_port = htons(port);
-            bind_addr.sin_addr.s_addr = INADDR_ANY;
-            if (bind(sockfd, (struct sockaddr *) &bind_addr, sizeof(bind_addr)) < 0) {
-                throw std::runtime_error("Bind failed");
-            }
-            std::cout << "UDP Worker listening on port " << port << "..." << std::endl;
+        // Always bind to local port (for both Master and Worker) to ensure symmetric addressing
+        // This is critical when talking to KernelTransport which expects replies on the same port
+        sockaddr_in bind_addr{};
+        bind_addr.sin_family = AF_INET;
+        bind_addr.sin_port = htons(port);
+        bind_addr.sin_addr.s_addr = INADDR_ANY;
+        if (bind(sockfd, (struct sockaddr *) &bind_addr, sizeof(bind_addr)) < 0) {
+            throw std::runtime_error("Bind failed on port " + std::to_string(port));
         }
 
-        // Configure Next Addr if provided
+        if (is_server) {
+            std::cout << "UDP Worker listening on port " << port << "..." << std::endl;
+        } else {
+            std::cout << "UDP Master bound to port " << port << std::endl;
+        }
+
+        // Configure Next Addr
         if (!next_ip.empty()) {
             next_addr.sin_family = AF_INET;
             next_addr.sin_port = htons(next_port);
@@ -43,14 +48,6 @@ namespace Inference {
                 throw std::runtime_error("Invalid Next IP");
             }
             std::cout << "UDP Chain: Next node at " << next_ip << ":" << next_port << std::endl;
-        } else if (!is_server) {
-            // Master mode (legacy/simple): 'ip' is the next node
-            next_addr.sin_family = AF_INET;
-            next_addr.sin_port = htons(port);
-            if (inet_pton(AF_INET, ip.c_str(), &next_addr.sin_addr) <= 0) {
-                throw std::runtime_error("Invalid IP");
-            }
-            std::cout << "UDP Master sending to " << ip << ":" << port << std::endl;
         }
     }
 

@@ -101,8 +101,10 @@ namespace Inference {
     }
 
     void KernelTransport::send_prev(const void *data, size_t size) {
-        // Only set IP, trust Kernel's learned port from the incoming packet
-        set_destination(prev_ip, 0); 
+        // Explicitly set port to prev_port. Relying on kernel's learned port is unsafe
+        // because send_next() overwrites the global dest_port in the kernel module.
+        // This assumes symmetric port configuration (Prev listens on prev_port).
+        set_destination(prev_ip, prev_port); 
         send(data, size);
     }
 

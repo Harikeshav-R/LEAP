@@ -26,13 +26,8 @@ namespace Inference {
         std::string dest_ip; // Current Dest IP
         int port;            // Listening Port
 
-        std::string prev_ip; // Usually same as initial dest_ip
-        int prev_port;       // Usually same as initial port (symmetric) or needs explicit config? 
-                             // Wait, port in constructor is LISTEN port. 
-                             // We need to know TARGET port for Prev.
-                             // Let's assume symmetric ports for now or use the 'port' arg as target too?
-                             // Standard UdpTransport uses 'port' for both if not specified.
-                             // Let's stick to the constructor signature I updated.
+        std::string prev_ip; // IP of the previous node in the pipeline
+        int prev_port;       // Target port for the previous node
 
         std::string next_ip;
         int next_port;

@@ -65,7 +65,7 @@ namespace Inference {
 
         ~QuantizedTransformer() override;
 
-        float *forward(int token, int pos) override;
+        float *forward(int token, int pos, int flags = FLAG_NEED_REPLY) override;
 
         void worker_loop() override;
 

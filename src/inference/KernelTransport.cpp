@@ -51,9 +51,11 @@ namespace Inference {
             std::cerr << "Warning: Failed to set destination IP in kernel" << std::endl;
         }
         
-        unsigned short p = static_cast<unsigned short>(target_port);
-        if (ioctl(fd, LEAP_IOCTL_SET_TX_PORT, &p) < 0) {
-             std::cerr << "Warning: Failed to set TX port in kernel" << std::endl;
+        if (target_port > 0) {
+            unsigned short p = static_cast<unsigned short>(target_port);
+            if (ioctl(fd, LEAP_IOCTL_SET_TX_PORT, &p) < 0) {
+                 std::cerr << "Warning: Failed to set TX port in kernel" << std::endl;
+            }
         }
     }
 
@@ -99,7 +101,8 @@ namespace Inference {
     }
 
     void KernelTransport::send_prev(const void *data, size_t size) {
-        set_destination(prev_ip, prev_port);
+        // Only set IP, trust Kernel's learned port from the incoming packet
+        set_destination(prev_ip, 0); 
         send(data, size);
     }
 

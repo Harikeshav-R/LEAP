@@ -40,6 +40,9 @@ namespace Inference {
             std::cout << "UDP Master bound to port " << port << std::endl;
         }
 
+        std::cout << "DEBUG: sizeof(leap_header) = " << sizeof(leap_header) << std::endl;
+        std::cout << "DEBUG: Initial seq_id = " << seq_id << std::endl;
+
         // Configure Next Addr
         if (!next_ip.empty()) {
             next_addr.sin_family = AF_INET;

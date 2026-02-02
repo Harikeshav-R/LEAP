@@ -99,6 +99,7 @@ static int send_udp_chunk(void *data, size_t len, uint16_t seq, uint16_t chunk, 
     hdr.seq_id = cpu_to_be16(seq);
     hdr.chunk_id = cpu_to_be16(chunk);
     hdr.total_chunks = cpu_to_be16(total);
+    hdr.reserved = 0;
 
     vec[0].iov_base = &hdr;
     vec[0].iov_len = sizeof(hdr);

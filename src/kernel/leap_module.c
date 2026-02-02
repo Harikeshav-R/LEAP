@@ -38,7 +38,7 @@ static unsigned long total_alloc_size; // 2 * LEAP_BUFFER_SIZE
 
 // Synchronization
 static DECLARE_WAIT_QUEUE_HEAD (leap_wait_queue);
-static atomic_t data_ready = ATOMIC_INIT(0);
+static DECLARE_BITMAP(data_ready_map, LEAP_RX_BANKS);
 static atomic_t open_count = ATOMIC_INIT(0);
 
 // Module Parameters
@@ -47,11 +47,14 @@ module_param(busy_wait_limit, int, 0644);
 MODULE_PARM_DESC(busy_wait_limit, "Number of iterations to busy-wait for data before sleeping");
 
 // RX State
-static spinlock_t rx_lock;
-static uint16_t active_seq_id = 0;
-static atomic_t chunks_received = ATOMIC_INIT(0);
-static unsigned int max_chunks;
-static unsigned long *rx_bitmap = NULL;
+static spinlock_t rx_locks[LEAP_RX_BANKS];
+static struct leap_bank_metadata bank_metadata_cache[LEAP_RX_BANKS];
+
+// Bank state (0 and 1)
+static uint16_t active_seq_ids[LEAP_RX_BANKS];
+static atomic_t chunks_received[LEAP_RX_BANKS];
+static unsigned int max_chunks_per_bank;
+static unsigned long *rx_bitmap[LEAP_RX_BANKS];
 
 // Networking (TX)
 static struct socket *tx_socket = NULL;
@@ -60,6 +63,7 @@ static unsigned int dest_ip = 0;
 static uint16_t dest_port = htons(LEAP_PORT);
 static uint16_t listening_port = htons(LEAP_PORT);
 static atomic_t global_seq_id = ATOMIC_INIT(0);
+static DEFINE_MUTEX(tx_lock);
 
 // Netfilter Hook (RX)
 static struct nf_hook_ops leap_nf_ops;
@@ -97,6 +101,7 @@ static int send_udp_chunk(void *data, size_t len, uint16_t seq, uint16_t chunk, 
     hdr.seq_id = cpu_to_be16(seq);
     hdr.chunk_id = cpu_to_be16(chunk);
     hdr.total_chunks = cpu_to_be16(total);
+    hdr.reserved = 0;
 
     vec[0].iov_base = &hdr;
     vec[0].iov_len = sizeof(hdr);
@@ -148,48 +153,48 @@ static unsigned int leap_nf_hook(void *priv, struct sk_buff *skb, const struct n
     uint16_t total_chunks = ntohs(lhdr->total_chunks);
     uint16_t seq_id = ntohs(lhdr->seq_id);
 
-    if (unlikely(total_chunks == 0 || total_chunks > max_chunks || chunk_id >= total_chunks)) return NF_ACCEPT;
+    if (unlikely(total_chunks == 0 || total_chunks > max_chunks_per_bank || chunk_id >= total_chunks)) return NF_ACCEPT;
 
-    if (dest_port != udph->source) dest_port = udph->source;
-
-    leap_offset = chunk_id * LEAP_CHUNK_SIZE;
+    // Bank Selection
+    int bank = seq_id % LEAP_RX_BANKS;
+    leap_offset = bank * LEAP_RX_BANK_SIZE + chunk_id * LEAP_CHUNK_SIZE;
     int data_len = payload_len - sizeof(struct leap_header);
     if (unlikely(data_len < 0)) return NF_ACCEPT;
 
     // Preliminary sequence check
-    spin_lock(&rx_lock);
-    int16_t diff = (int16_t)(seq_id - active_seq_id);
-    if (diff > 0) {
-        active_seq_id = seq_id;
-        atomic_set(&chunks_received, 0);
+    spin_lock(&rx_locks[bank]);
+    // Relaxed check: Just track active seq for this bank.
+    if (seq_id != active_seq_ids[bank]) {
+        active_seq_ids[bank] = seq_id;
+        atomic_set(&chunks_received[bank], 0);
         // Reset bitmap for new sequence
-        bitmap_zero(rx_bitmap, max_chunks);
-    } else if (diff < 0) {
-        spin_unlock(&rx_lock);
-        return NF_ACCEPT;
-    }
-    spin_unlock(&rx_lock);
+        bitmap_zero(rx_bitmap[bank], max_chunks_per_bank);
+        
+        // Store source info for this sequence
+        bank_metadata_cache[bank].saddr = iph->saddr;
+        bank_metadata_cache[bank].sport = udph->source;
+    } 
+    spin_unlock(&rx_locks[bank]);
 
     if (likely(leap_offset + data_len <= leap_buffer_size)) {
         int abs_offset = payload_offset + sizeof(struct leap_header);
         
-        // Optimization: Prefetch destination cache line for writing
         prefetchw(leap_buffer + leap_offset);
 
         if (skb_copy_bits(skb, abs_offset, leap_buffer + leap_offset, data_len) < 0) return NF_ACCEPT;
 
-        spin_lock(&rx_lock);
-        // Verify sequence is still active
-        if (seq_id == active_seq_id) {
-            // Only increment if this chunk wasn't already received
-            if (!test_and_set_bit(chunk_id, rx_bitmap)) {
-                if (atomic_inc_return(&chunks_received) == total_chunks) {
-                    atomic_set(&data_ready, 1);
+        spin_lock(&rx_locks[bank]);
+        // Verify sequence is still active for this bank
+        if (seq_id == active_seq_ids[bank]) {
+            if (!test_and_set_bit(chunk_id, rx_bitmap[bank])) {
+                if (atomic_inc_return(&chunks_received[bank]) == total_chunks) {
+                    // Set ready bit for this bank
+                    set_bit(bank, data_ready_map);
                     wake_up_interruptible(&leap_wait_queue);
                 }
             }
         }
-        spin_unlock(&rx_lock);
+        spin_unlock(&rx_locks[bank]);
     }
 
     consume_skb(skb);
@@ -210,11 +215,14 @@ static int leap_dev_release(struct inode *inodep, struct file *filep) {
     dest_port = htons(LEAP_PORT);
 
     // Reset RX State
-    spin_lock_bh(&rx_lock);
-    active_seq_id = 0;
-    atomic_set(&chunks_received, 0);
-    if (rx_bitmap) bitmap_zero(rx_bitmap, max_chunks);
-    spin_unlock_bh(&rx_lock);
+    bitmap_zero(data_ready_map, LEAP_RX_BANKS);
+    for (int i = 0; i < LEAP_RX_BANKS; i++) {
+        spin_lock_bh(&rx_locks[i]);
+        active_seq_ids[i] = 0;
+        atomic_set(&chunks_received[i], 0);
+        if (rx_bitmap[i]) bitmap_zero(rx_bitmap[i], max_chunks_per_bank);
+        spin_unlock_bh(&rx_locks[i]);
+    }
 
     return 0;
 }
@@ -232,14 +240,23 @@ static ssize_t leap_dev_write(struct file *filep, const char __user *buffer, siz
     void *kbuf;
 
     if (len > leap_buffer_size) return -EMSGSIZE;
-    if (!tx_socket) return -EIO;
+    
+    mutex_lock(&tx_lock);
+    if (!tx_socket) {
+        mutex_unlock(&tx_lock);
+        return -EIO;
+    }
 
     total_chunks = (len + LEAP_CHUNK_SIZE - 1) / LEAP_CHUNK_SIZE;
     kbuf = vmalloc(len);
-    if (!kbuf) return -ENOMEM;
+    if (!kbuf) {
+        mutex_unlock(&tx_lock);
+        return -ENOMEM;
+    }
 
     if (copy_from_user(kbuf, buffer, len)) {
         vfree(kbuf);
+        mutex_unlock(&tx_lock);
         return -EFAULT;
     }
 
@@ -251,20 +268,39 @@ static ssize_t leap_dev_write(struct file *filep, const char __user *buffer, siz
         cond_resched();
     }
     vfree(kbuf);
+    mutex_unlock(&tx_lock);
     return len;
 }
 
 static long leap_dev_ioctl(struct file *filep, unsigned int cmd, unsigned long arg) {
     if (cmd == LEAP_IOCTL_WAIT_DATA) {
         int i;
+        // Busy wait for ANY bank to be ready
         for (i = 0; i < busy_wait_limit; i++) {
-            if (atomic_xchg(&data_ready, 0) != 0) {
-                return 0;
-            }
+            if (!bitmap_empty(data_ready_map, LEAP_RX_BANKS)) break;
             cpu_relax();
         }
-        if (wait_event_interruptible(leap_wait_queue, atomic_xchg(&data_ready, 0) != 0)) return -ERESTARTSYS;
-        return 0;
+        
+        // Sleep if still not ready
+        if (bitmap_empty(data_ready_map, LEAP_RX_BANKS)) {
+            if (wait_event_interruptible(leap_wait_queue, !bitmap_empty(data_ready_map, LEAP_RX_BANKS))) return -ERESTARTSYS;
+        }
+
+        // Find which bank is ready
+        unsigned long bank = find_first_bit(data_ready_map, LEAP_RX_BANKS);
+
+        if (bank < LEAP_RX_BANKS) {
+            clear_bit(bank, data_ready_map);
+            
+            // Reset state for this bank immediately to prepare for next
+            spin_lock_bh(&rx_locks[bank]);
+            atomic_set(&chunks_received[bank], 0);
+            if (rx_bitmap[bank]) bitmap_zero(rx_bitmap[bank], max_chunks_per_bank);
+            spin_unlock_bh(&rx_locks[bank]);
+            
+            return (long)bank; 
+        }
+        return -EAGAIN; // Should not happen if wait succeeded
     } else if (cmd == LEAP_IOCTL_SET_DEST) {
         if (copy_from_user(&dest_ip, (unsigned int __user *)arg, sizeof(dest_ip))) return -EFAULT;
         memset(&dest_addr, 0, sizeof(dest_addr));
@@ -274,14 +310,70 @@ static long leap_dev_ioctl(struct file *filep, unsigned int cmd, unsigned long a
         return 0;
     } else if (cmd == LEAP_IOCTL_SET_PORT) {
         unsigned short port_arg;
+        struct sockaddr_in bind_addr;
+        int ret;
+
         if (copy_from_user(&port_arg, (unsigned short __user *)arg, sizeof(port_arg))) return -EFAULT;
+        
+        mutex_lock(&tx_lock);
         listening_port = htons(port_arg);
         if (dest_port == htons(LEAP_PORT)) dest_port = htons(port_arg);
+
+        // Re-create and bind TX socket to ensure Source Port == Listening Port
+        // This is critical for the receiving node to learn the correct return port
+        if (tx_socket) {
+            sock_release(tx_socket);
+            tx_socket = NULL;
+        }
+
+        ret = sock_create_kern(&init_net, PF_INET, SOCK_DGRAM, IPPROTO_UDP, &tx_socket);
+        if (ret < 0) {
+            pr_err("LEAP: Failed to recreate TX socket: %d\n", ret);
+            mutex_unlock(&tx_lock);
+            return ret;
+        }
+
+        memset(&bind_addr, 0, sizeof(bind_addr));
+        bind_addr.sin_family = AF_INET;
+        bind_addr.sin_port = listening_port;
+        bind_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+
+        ret = kernel_bind(tx_socket, (struct sockaddr *)&bind_addr, sizeof(bind_addr));
+        if (ret < 0) {
+            pr_err("LEAP: Failed to bind TX socket to %d: %d\n", port_arg, ret);
+            mutex_unlock(&tx_lock);
+            return ret;
+        }
+        
+        if (tx_socket->sk) tx_socket->sk->sk_no_check_tx = 1;
+        mutex_unlock(&tx_lock);
+
+        return 0;
+    } else if (cmd == LEAP_IOCTL_SET_TX_PORT) {
+        unsigned short port_arg;
+        if (copy_from_user(&port_arg, (unsigned short __user *)arg, sizeof(port_arg))) return -EFAULT;
+        dest_port = htons(port_arg);
+        return 0;
+    } else if (cmd == LEAP_IOCTL_GET_BANK_SRC) {
+        struct leap_bank_metadata meta;
+        if (copy_from_user(&meta, (struct leap_bank_metadata __user *)arg, sizeof(meta))) return -EFAULT;
+        
+        if (meta.bank_idx < 0 || meta.bank_idx >= LEAP_RX_BANKS) return -EINVAL;
+        
+        meta.saddr = bank_metadata_cache[meta.bank_idx].saddr;
+        meta.sport = bank_metadata_cache[meta.bank_idx].sport;
+        
+        if (copy_to_user((struct leap_bank_metadata __user *)arg, &meta, sizeof(meta))) return -EFAULT;
         return 0;
     } else if (cmd == LEAP_IOCTL_SEND) {
         unsigned int data_len;
         if (copy_from_user(&data_len, (unsigned int __user *)arg, sizeof(data_len))) return -EFAULT;
-        if (data_len > leap_buffer_size || !tx_socket) return -EINVAL;
+        
+        mutex_lock(&tx_lock);
+        if (data_len > leap_buffer_size || !tx_socket) {
+            mutex_unlock(&tx_lock);
+            return -EINVAL;
+        }
 
         uint16_t total_chunks = (data_len + LEAP_CHUNK_SIZE - 1) / LEAP_CHUNK_SIZE;
         uint16_t current_seq = (uint16_t)atomic_inc_return(&global_seq_id);
@@ -296,6 +388,7 @@ static long leap_dev_ioctl(struct file *filep, unsigned int cmd, unsigned long a
             if (unlikely(processed + chunk_len > leap_buffer_size)) {
                 pr_err("LEAP: Buffer overflow detected in IOCTL_SEND! processed=%zu, chunk=%zu, max=%lu\n", 
                        processed, chunk_len, leap_buffer_size);
+                mutex_unlock(&tx_lock);
                 return -EFAULT;
             }
 
@@ -303,6 +396,7 @@ static long leap_dev_ioctl(struct file *filep, unsigned int cmd, unsigned long a
             processed += chunk_len;
             cond_resched();
         }
+        mutex_unlock(&tx_lock);
         return data_len;
     }
     return -EINVAL;
@@ -360,7 +454,7 @@ static int __init leap_init(void) {
         return -EINVAL;
     }
 
-    max_chunks = (leap_buffer_size + LEAP_CHUNK_SIZE - 1) / LEAP_CHUNK_SIZE;
+    max_chunks_per_bank = (LEAP_RX_BANK_SIZE + LEAP_CHUNK_SIZE - 1) / LEAP_CHUNK_SIZE;
     total_alloc_size = leap_buffer_size * 2;
 
     /*
@@ -372,14 +466,20 @@ static int __init leap_init(void) {
     if (!leap_buffer) return -ENOMEM;
     memset(leap_buffer, 0, total_alloc_size);
 
-    // Allocate RX Bitmap
-    rx_bitmap = bitmap_zalloc(max_chunks, GFP_KERNEL);
-    if (!rx_bitmap) {
-        vfree(leap_buffer);
-        return -ENOMEM;
+    // Initialize state
+    bitmap_zero(data_ready_map, LEAP_RX_BANKS);
+    for (int i = 0; i < LEAP_RX_BANKS; i++) {
+        spin_lock_init(&rx_locks[i]);
+        active_seq_ids[i] = 0;
+        atomic_set(&chunks_received[i], 0);
+        rx_bitmap[i] = bitmap_zalloc(max_chunks_per_bank, GFP_KERNEL);
+        if (!rx_bitmap[i]) {
+            // Cleanup on failure
+            for (int j = 0; j < i; j++) bitmap_free(rx_bitmap[j]);
+            vfree(leap_buffer);
+            return -ENOMEM;
+        }
     }
-
-    spin_lock_init(&rx_lock);
 
     ret = alloc_chrdev_region(&dev_no, 0, 1, LEAP_DEVICE_NAME);
     if (ret < 0) goto err_buffer;
@@ -415,7 +515,9 @@ err_device: device_destroy(leap_class, dev_no);
 err_class: class_destroy(leap_class);
 err_chrdev: unregister_chrdev_region(dev_no, 1);
 err_buffer: 
-    bitmap_free(rx_bitmap);
+    for (int i = 0; i < LEAP_RX_BANKS; i++) {
+        if (rx_bitmap[i]) bitmap_free(rx_bitmap[i]);
+    }
     vfree(leap_buffer);
     return ret;
 }
@@ -428,7 +530,9 @@ static void __exit leap_exit(void) {
     device_destroy(leap_class, dev_no);
     class_destroy(leap_class);
     unregister_chrdev_region(dev_no, 1);
-    bitmap_free(rx_bitmap);
+    for (int i = 0; i < LEAP_RX_BANKS; i++) {
+        if (rx_bitmap[i]) bitmap_free(rx_bitmap[i]);
+    }
     vfree(leap_buffer);
 }
 

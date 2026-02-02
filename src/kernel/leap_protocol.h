@@ -22,9 +22,19 @@ typedef uint8_t __u8;
 #define LEAP_IOCTL_WAIT_DATA _IO(LEAP_IOCTL_MAGIC, 1)
 #define LEAP_IOCTL_SET_DEST  _IOW(LEAP_IOCTL_MAGIC, 2, unsigned int) // Set Dest IP (u32)
 #define LEAP_IOCTL_SET_PORT  _IOW(LEAP_IOCTL_MAGIC, 3, unsigned short) // Set Listen Port (u16)
+#define LEAP_IOCTL_SET_TX_PORT _IOW(LEAP_IOCTL_MAGIC, 5, unsigned short) // Set TX Port (u16)
+#define LEAP_IOCTL_GET_BANK_SRC _IOWR(LEAP_IOCTL_MAGIC, 6, struct leap_bank_metadata)
+
+struct leap_bank_metadata {
+    int bank_idx;
+    uint32_t saddr;
+    uint16_t sport;
+};
 
 // Buffer Size (8MB)
 #define LEAP_BUFFER_SIZE (8 * 1024 * 1024)
+#define LEAP_RX_BANKS 64
+#define LEAP_RX_BANK_SIZE (LEAP_BUFFER_SIZE / LEAP_RX_BANKS)
 #define LEAP_CHUNK_SIZE 1400
 
 // Packet Header structure
@@ -33,6 +43,7 @@ struct leap_header {
     __be16 seq_id;
     __be16 chunk_id;
     __be16 total_chunks;
+    __be16 reserved; // Explicit padding to 12 bytes for alignment safety
 } __attribute__((packed));
 
 /*

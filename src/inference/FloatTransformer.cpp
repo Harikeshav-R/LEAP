@@ -1,4 +1,5 @@
 #include "FloatTransformer.h"
+#include "../kernel/leap_protocol.h"
 #include <cmath>
 #include <unistd.h>
 #include <sys/mman.h>
@@ -660,7 +661,7 @@ namespace Inference {
         }
     }
 
-    float *FloatTransformer::forward(const int token, const int pos) {
+    float *FloatTransformer::forward(const int token, const int pos, const int flags) {
         const Config *p = &config;
         const FloatTransformerWeights *w = &weights;
         FloatRunState *s = &state;
@@ -684,15 +685,29 @@ namespace Inference {
         if (dist_config.mode == DistributedMode::Master) {
             if (!dist_config.transport) throw std::runtime_error("Transport not set for master");
 
-            // Combine pos and x into one buffer to avoid transport race conditions
-            std::vector<char> buffer(sizeof(int) + dim * sizeof(float));
-            std::memcpy(buffer.data(), &pos, sizeof(int));
-            std::memcpy(buffer.data() + sizeof(int), x, dim * sizeof(float));
+            // Combine Header and x into one buffer
+            // Safety check for kernel transport limits
+            if (sizeof(PacketHeader) + dim * sizeof(float) > LEAP_RX_BANK_SIZE) {
+                throw std::runtime_error("Packet size exceeds LEAP_RX_BANK_SIZE. Reduce model dimension or increase buffer size.");
+            }
 
-            dist_config.transport->send(buffer.data(), buffer.size());
+            std::vector<char> buffer(sizeof(PacketHeader) + dim * sizeof(float));
+            PacketHeader header{pos, flags};
+            
+            std::memcpy(buffer.data(), &header, sizeof(PacketHeader));
+            std::memcpy(buffer.data() + sizeof(PacketHeader), x, dim * sizeof(float));
 
-            // Receive result
-            dist_config.transport->recv(x, dim * sizeof(float));
+            // Master sends to Next (Worker 1)
+            dist_config.transport->send_next(buffer.data(), buffer.size());
+
+            if (flags == FLAG_NEED_REPLY) {
+                // Receive result from Next (Worker 1)
+                dist_config.transport->recv_next(x, dim * sizeof(float));
+            } else {
+                // Fire and forget, return null or dummy
+                // The caller should know not to use the result if flags=NO_REPLY
+                return nullptr;
+            }
         }
 
         rmsnorm(x, x, w->rms_final_weight, dim);
@@ -705,30 +720,48 @@ namespace Inference {
 
         float *x = state.x.data();
         const int dim = config.dim;
-        int pos = 0;
+        PacketHeader header{};
 
         const int start_layer = dist_config.split_layer;
-        const int end_layer = config.n_layers;
+        
+        // Process layers assigned to this worker [split_layer, end_layer)
+        std::vector<char> buffer(sizeof(PacketHeader) + dim * sizeof(float));
 
-        std::vector<char> buffer(sizeof(int) + dim * sizeof(float));
-
-        std::cout << "Worker started. Processing layers " << start_layer << " to " << end_layer - 1 << std::endl;
+        std::cout << "Worker started. Processing layers " << start_layer << " to " << dist_config.end_layer - 1 << std::endl;
 
         while (true) {
             try {
-                // Receive combined buffer
-                dist_config.transport->recv(buffer.data(), buffer.size());
+                // Receive header + data from Prev
+                dist_config.transport->recv_prev(buffer.data(), buffer.size());
 
-                std::memcpy(&pos, buffer.data(), sizeof(int));
-                std::memcpy(x, buffer.data() + sizeof(int), dim * sizeof(float));
+                std::memcpy(&header, buffer.data(), sizeof(PacketHeader));
+                std::memcpy(x, buffer.data() + sizeof(PacketHeader), dim * sizeof(float));
 
                 // Process layers
-                for (int l = start_layer; l < end_layer; l++) {
-                    run_layer(l, pos, x);
+                for (int l = start_layer; l < dist_config.end_layer; l++) {
+                    run_layer(l, header.pos, x);
                 }
 
-                // Send back x
-                dist_config.transport->send(x, dim * sizeof(float));
+                if (!dist_config.is_tail) {
+                    // Forward to Next
+                    // Re-use buffer, update x content
+                    std::memcpy(buffer.data() + sizeof(PacketHeader), x, dim * sizeof(float));
+                    dist_config.transport->send_next(buffer.data(), buffer.size());
+
+                    if (header.flags == FLAG_NEED_REPLY) {
+                        // Wait for reply from Next
+                        dist_config.transport->recv_next(x, dim * sizeof(float));
+                        // Forward reply to Prev
+                        dist_config.transport->send_prev(x, dim * sizeof(float));
+                    }
+                    // If NO_REPLY, we are done with this token for this direction.
+                } else {
+                    // Tail: Send back if needed
+                    if (header.flags == FLAG_NEED_REPLY) {
+                        dist_config.transport->send_prev(x, dim * sizeof(float));
+                    }
+                }
+
             } catch (const std::exception &e) {
                 std::cerr << "Worker loop error: " << e.what() << std::endl;
                 break;

@@ -5,14 +5,15 @@
 #include "TcpTransport.h"
 #include "UdpTransport.h"
 #include "KernelTransport.h"
+#include <CLI/CLI.hpp>
 #include <iostream>
 #include <vector>
 #include <string>
 
 using namespace Inference;
 
+// ... (Keep existing helper functions like read_stdin, generate, chat) ...
 void read_stdin(const char *guide, std::string &buffer) {
-    // ... (rest of file)
     std::cout << guide;
     std::getline(std::cin, buffer);
 }
@@ -36,11 +37,14 @@ void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, 
     int pos = 0;
 
     while (pos < steps) {
-        float *logits = transformer->forward(token, pos);
+        // Pipelining: Fire-and-forget for prompt tokens except the last one
+        int flags = (pos < num_prompt_tokens - 1) ? FLAG_NO_REPLY : FLAG_NEED_REPLY;
+        float *logits = transformer->forward(token, pos, flags);
 
         if (pos < num_prompt_tokens - 1) {
             next = prompt_tokens[pos + 1];
         } else {
+            // We only need logits for the last prompt token and generation
             next = sampler->sample(logits);
         }
         pos++;
@@ -142,8 +146,23 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, cons
             user_turn = true;
         }
 
-        float *logits = transformer->forward(token, pos);
-        next = sampler->sample(logits);
+        int flags = FLAG_NEED_REPLY;
+        if (user_idx < prompt_tokens.size()) {
+            flags = FLAG_NO_REPLY;
+        }
+
+        float *logits = transformer->forward(token, pos, flags);
+        
+        if (flags == FLAG_NO_REPLY) {
+            if (user_idx < prompt_tokens.size()) {
+                next = prompt_tokens[user_idx];
+            } else {
+                next = 0;
+            }
+        } else {
+            next = sampler->sample(logits);
+        }
+        
         pos++;
 
         if (user_idx >= prompt_tokens.size() && (next == 128009 || next == 128001)) {
@@ -158,151 +177,182 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, cons
     std::cout << std::endl;
 }
 
-void error_usage() {
-    std::cerr << "Usage:   run <checkpoint> [options]\n";
-    std::cerr << "Example: run model.bin -n 4096 -i \"Once upon a time\"\n";
-    std::cerr << "Options:\n";
-    std::cerr << "  -t <float>  temperature in [0,inf], default 1.0\n";
-    std::cerr << "  -p <float>  p value in top-p (nucleus) sampling in [0,1] default 0.9\n";
-    std::cerr << "  -s <int>    random seed, default time(NULL)\n";
-    std::cerr << "  -n <int>    number of steps to run for, default 4096. 0 = max_seq_len\n";
-    std::cerr << "  -i <string> input prompt\n";
-    std::cerr << "  -z <string> optional path to custom tokenizer\n";
-    std::cerr << "  -m <string> mode: generate|chat, default: generate\n";
-    std::cerr << "  -y <string> (optional) system prompt in chat mode\n";
-    std::cerr << "Distributed Options:\n";
-    std::cerr << "  --dist <mode>  distributed mode: single|master|worker|master-udp|worker-udp|worker-kernel, default: single\n";
-    std::cerr << "  --ip <string>  worker IP address (for master) or bind address (for worker), default: 0.0.0.0\n";
-    std::cerr << "  --master-ip <string> master IP address (only for worker-kernel mode)\n";
-    std::cerr << "  --port <int>   port number, default: 9999\n";
-    std::cerr << "  --split <int>  layer index to split at, default: 0\n";
-    std::exit(EXIT_FAILURE);
-}
-
 int main(int argc, char *argv[]) {
-    std::string checkpoint_path;
+    CLI::App app{"LEAP Inference Engine - High-performance distributed LLM inference"};
+    app.description("A specialized runner for LEAP models supporting single-node and distributed pipelined inference.\n"
+                    "Example (Single Node):\n"
+                    "  ./inference model.bin -p \"Hello, how are you?\"\n\n"
+                    "Example (Distributed Master):\n"
+                    "  ./inference model.bin --role master --next-host 192.168.1.10 --next-port 9999 --split 16\n\n"
+                    "Example (Distributed Worker):\n"
+                    "  ./inference model.bin --role worker --port 9999 --next-host 192.168.1.11 --next-port 9999 --split 16 --end 32");
+    
+    argv = app.ensure_utf8(argv);
+
+    // Core arguments
+    std::string model_path;
     std::string tokenizer_path = "tokenizer.bin";
-    float temperature = 1.0f;
-    float topp = 0.9f;
-    int steps = 4096;
-    std::string prompt;
-    unsigned long long rng_seed = 0;
+    app.add_option("model", model_path, "Path to the model checkpoint file (.bin)")
+        ->required()
+        ->check(CLI::ExistingFile);
+
+    // General Configuration
+    auto *gen_group = app.add_option_group("General", "Basic inference settings");
     std::string mode = "generate";
+    bool chat_mode = false;
+    gen_group->add_flag("-c,--chat", chat_mode, "Run in interactive chat mode");
+    gen_group->add_option("-t,--tokenizer", tokenizer_path, "Path to the tokenizer file")
+        ->check(CLI::ExistingFile)
+        ->capture_default_str();
+    int n_predict = 4096;
+    gen_group->add_option("-n,--n-predict", n_predict, "Maximum number of tokens to generate (0 = model max)")
+        ->capture_default_str();
+    unsigned long long rng_seed = 0;
+    gen_group->add_option("--seed", rng_seed, "Random seed for reproducibility (0 = use current time)")
+        ->capture_default_str();
+
+    // Sampling Configuration
+    auto *sample_group = app.add_option_group("Sampling", "Tokens selection parameters");
+    float temperature = 1.0f;
+    sample_group->add_option("--temp", temperature, "Temperature for sampling (higher = more creative, 0.0 = greedy)")
+        ->check(CLI::NonNegativeNumber)
+        ->capture_default_str();
+    float topp = 0.9f;
+    sample_group->add_option("--top-p", topp, "Top-P (nucleus) sampling threshold")
+        ->check(CLI::Range(0.0, 1.0))
+        ->capture_default_str();
+
+    // Input
+    auto *input_group = app.add_option_group("Input", "Prompt configuration");
+    std::string prompt;
+    input_group->add_option("-p,--prompt", prompt, "Initial input prompt for the model");
     std::string system_prompt;
+    input_group->add_option("--system", system_prompt, "System prompt for chat mode");
 
-    // Distributed args
-    std::string dist_mode_str = "single";
-    std::string ip = "0.0.0.0";
-    std::string master_ip = "";
+    // Distributed Inference
+    auto *dist_group = app.add_option_group("Distributed", "Configuration for multi-node pipeline parallelism");
+    std::string role = "single";
+    dist_group->add_option("--role", role, "Node role in the cluster")
+        ->check(CLI::IsMember({"single", "master", "worker"}))
+        ->capture_default_str();
+    std::string transport_type = "tcp";
+    dist_group->add_option("--transport", transport_type, "Network transport protocol")
+        ->check(CLI::IsMember({"tcp", "udp", "kernel"}))
+        ->capture_default_str();
+    
+    std::string host = "0.0.0.0";
+    dist_group->add_option("--host", host, "Local IP to bind for incoming connections (Workers)")
+        ->capture_default_str();
     int port = 9999;
+    dist_group->add_option("--port", port, "Local port to bind for incoming connections (Workers)")
+        ->check(CLI::Range(1, 65535))
+        ->capture_default_str();
+    
+    std::string next_host = "";
+    dist_group->add_option("--next-host", next_host, "IP address of the next node in the pipeline");
+    int next_port = 0;
+    dist_group->add_option("--next-port", next_port, "Port of the next node in the pipeline")
+        ->check(CLI::Range(0, 65535));
+    
     int split_layer = 0;
+    dist_group->add_option("--split", split_layer, "Layer index to start processing on this node")
+        ->capture_default_str();
+    int end_layer = 0;
+    dist_group->add_option("--end", end_layer, "Layer index to stop processing (exclusive, 0 = until end)")
+        ->capture_default_str();
 
-    if (argc >= 2) {
-        checkpoint_path = argv[1];
-    } else {
-        error_usage();
-    }
+    std::string master_host = "";
+    dist_group->add_option("--master-host", master_host, "Master IP address (required for kernel transport)");
 
-    for (int i = 2; i < argc; i += 2) {
-        if (i + 1 >= argc) error_usage();
-        // Check for long args
-        std::string arg = argv[i];
-        if (arg == "--dist") dist_mode_str = argv[i + 1];
-        else if (arg == "--ip") ip = argv[i + 1];
-        else if (arg == "--master-ip") master_ip = argv[i + 1];
-        else if (arg == "--port") port = std::stoi(argv[i + 1]);
-        else if (arg == "--split") split_layer = std::stoi(argv[i + 1]);
-        else if (arg[0] == '-') {
-            if (arg.length() != 2) error_usage();
-            if (argv[i][1] == 't') temperature = std::stof(argv[i + 1]);
-            else if (argv[i][1] == 'p') topp = std::stof(argv[i + 1]);
-            else if (argv[i][1] == 's') rng_seed = std::stoll(argv[i + 1]);
-            else if (argv[i][1] == 'n') steps = std::stoi(argv[i + 1]);
-            else if (argv[i][1] == 'i') prompt = argv[i + 1];
-            else if (argv[i][1] == 'z') tokenizer_path = argv[i + 1];
-            else if (argv[i][1] == 'm') mode = argv[i + 1];
-            else if (argv[i][1] == 'y') system_prompt = argv[i + 1];
-            else error_usage();
-        } else {
-            error_usage();
-        }
-    }
+    CLI11_PARSE(app, argc, argv);
 
-    if (rng_seed <= 0) rng_seed = static_cast<unsigned int>(std::time(nullptr));
-    if (temperature < 0.0) temperature = 0.0;
-    if (topp < 0.0 || 1.0 < topp) topp = 0.9;
-    if (steps < 0) steps = 0;
+    // Post-processing
+    if (chat_mode) mode = "chat";
+    if (rng_seed == 0) rng_seed = static_cast<unsigned int>(std::time(nullptr));
+    if (n_predict < 0) n_predict = 0;
 
     try {
-        auto transformer = Transformer::create(checkpoint_path);
+        auto transformer = Transformer::create(model_path);
 
-        std::cout << "Model loaded successfully." << std::endl;
-        std::cout << "Config: ["
+        std::cout << "Model loaded: " << model_path << std::endl;
+        std::cout << "Architecture: "
                 << transformer->config.n_layers << " layers, "
                 << transformer->config.dim << " dim, "
                 << transformer->config.n_heads << " heads, "
                 << transformer->config.vocab_size << " vocab, "
-                << transformer->config.seq_len << " seq_len]" << std::endl;
+                << transformer->config.seq_len << " context" << std::endl;
 
-        if (steps == 0 || steps > transformer->config.seq_len) {
-            steps = transformer->config.seq_len;
+        if (n_predict == 0 || n_predict > transformer->config.seq_len) {
+            n_predict = transformer->config.seq_len;
         }
+        
+        if (end_layer == 0) end_layer = transformer->config.n_layers;
 
         // Setup Distributed Mode
-        DistributedMode dist_mode = DistributedMode::Single;
+        DistributedMode dist_role = DistributedMode::Single;
+        if (role == "master") dist_role = DistributedMode::Master;
+        else if (role == "worker") dist_role = DistributedMode::Worker;
+
         std::unique_ptr<Transport> transport = nullptr;
 
-        if (dist_mode_str == "master") {
-            dist_mode = DistributedMode::Master;
+        if (dist_role == DistributedMode::Master) {
             if (split_layer <= 0 || split_layer >= transformer->config.n_layers) {
-                std::cerr << "Invalid split layer for master mode" << std::endl;
-                return 1;
+                throw std::runtime_error("Invalid --split layer for master. Must be > 0 and < n_layers.");
             }
-            transport = std::make_unique<TcpTransport>(ip, port, false);
-            transport->initialize();
-        } else if (dist_mode_str == "worker") {
-            dist_mode = DistributedMode::Worker;
+            // Warning: No validation of worker config (gap check)
+            std::cerr << "Warning: Ensure the first worker is configured to start at layer " << split_layer 
+                      << " to avoid gaps or overlaps." << std::endl;
+
+            if (next_host.empty() || next_port == 0) {
+                throw std::runtime_error("Master role requires --next-host and --next-port to connect to workers.");
+            }
+            
+            if (transport_type == "tcp") {
+                transport = std::make_unique<TcpTransport>(next_host, next_port, false, "", 0);
+            } else if (transport_type == "udp") {
+                transport = std::make_unique<UdpTransport>(host, port, false, next_host, next_port);
+            } else {
+                throw std::runtime_error("Master role does not support 'kernel' transport (Workers only).");
+            }
+        } else if (dist_role == DistributedMode::Worker) {
             if (split_layer <= 0 || split_layer >= transformer->config.n_layers) {
-                std::cerr << "Invalid split layer for worker mode" << std::endl;
-                return 1;
+                throw std::runtime_error("Invalid --split layer for worker.");
             }
-            transport = std::make_unique<TcpTransport>(ip, port, true);
-            transport->initialize();
-        } else if (dist_mode_str == "udp") {
-            // UDP Mode (Standard User Space UDP)
-            // Use --dist udp for both Master (client) and Worker (server) logic
-            // But we need to know role. Let's reuse 'master/worker' logic but add transport type arg?
-            // Simpler: --dist master-udp / --dist worker-udp / --dist worker-kernel
-            std::cerr << "Use specific modes: master-udp, worker-udp, worker-kernel" << std::endl;
-            return 1;
-        } else if (dist_mode_str == "master-udp") {
-            dist_mode = DistributedMode::Master;
-            transport = std::make_unique<UdpTransport>(ip, port, false);
-            transport->initialize();
-        } else if (dist_mode_str == "worker-udp") {
-            dist_mode = DistributedMode::Worker;
-            transport = std::make_unique<UdpTransport>(ip, port, true);
-            transport->initialize();
-        } else if (dist_mode_str == "worker-kernel") {
+            if (end_layer <= split_layer) {
+                throw std::runtime_error("Invalid range: --end layer must be greater than --split layer for worker.");
+            }
+            
+            if (transport_type == "tcp") {
+                transport = std::make_unique<TcpTransport>(host, port, true, next_host, next_port);
+            } else if (transport_type == "udp") {
+                transport = std::make_unique<UdpTransport>(host, port, true, next_host, next_port);
+            } else if (transport_type == "kernel") {
 #ifndef __linux__
-            std::cerr << "Error: --dist worker-kernel is only supported on Linux." << std::endl;
-            return 1;
+                throw std::runtime_error("Kernel transport is only supported on Linux.");
 #else
-            dist_mode = DistributedMode::Worker;
-            // For worker-kernel, we need the Master's IP to set as destination
-            std::string target_ip = master_ip.empty() ? ip : master_ip;
-            transport = std::make_unique<KernelTransport>(target_ip, port);
-            transport->initialize();
+                std::string target = master_host.empty() ? host : master_host;
+                transport = std::make_unique<KernelTransport>(target, port, next_host, next_port);
 #endif
-        } else if (dist_mode_str != "single") {
-            std::cerr << "Unknown distributed mode: " << dist_mode_str << std::endl;
-            return 1;
+            }
         }
 
-        transformer->set_distributed_config(dist_mode, split_layer, transport.get());
+        if (transport) {
+            transport->initialize();
+        }
 
-        if (dist_mode == DistributedMode::Worker) {
-            // Worker enters loop and stays there
+        DistributedConfig dist_config;
+        dist_config.mode = dist_role;
+        dist_config.split_layer = split_layer;
+        dist_config.end_layer = end_layer;
+        dist_config.transport = transport.get();
+        dist_config.next_ip = next_host;
+        dist_config.next_port = next_port;
+        dist_config.is_tail = (dist_role == DistributedMode::Worker && next_host.empty());
+        
+        transformer->set_distributed_config(dist_config);
+
+        if (dist_role == DistributedMode::Worker) {
+            std::cout << "Node started as Worker [Layers " << split_layer << " to " << end_layer << "]" << std::endl;
             transformer->worker_loop();
             return 0;
         }
@@ -312,15 +362,12 @@ int main(int argc, char *argv[]) {
         Sampler sampler(transformer->config.vocab_size, temperature, topp, rng_seed);
 
         if (mode == "generate") {
-            generate(transformer.get(), &tokenizer, &sampler, prompt, steps);
+            generate(transformer.get(), &tokenizer, &sampler, prompt, n_predict);
         } else if (mode == "chat") {
-            chat(transformer.get(), &tokenizer, &sampler, prompt, system_prompt, steps);
-        } else {
-            std::cerr << "unknown mode: " << mode << std::endl;
-            error_usage();
+            chat(transformer.get(), &tokenizer, &sampler, prompt, system_prompt, n_predict);
         }
     } catch (const std::exception &e) {
-        std::cerr << "Error: " << e.what() << std::endl;
+        std::cerr << "\n[Error] " << e.what() << std::endl;
         return 1;
     }
 

@@ -77,15 +77,19 @@ namespace Inference {
     }
 
     void KernelTransport::recv(void *data, const size_t size) {
-        // Wait for data to be ready (Kernel writes to Lower 8MB)
-        if (ioctl(fd, LEAP_IOCTL_WAIT_DATA, 0) < 0) {
+        // Wait for data to be ready (Kernel writes to Lower 8MB, split into 2 banks)
+        // IOCTL returns the bank index (0 or 1)
+        int bank = ioctl(fd, LEAP_IOCTL_WAIT_DATA, 0);
+        if (bank < 0) {
             throw std::runtime_error("IOCTL wait failed");
         }
 
-        if (size > LEAP_BUFFER_SIZE) throw std::runtime_error("Recv size too large for kernel buffer");
+        if (size > LEAP_RX_BANK_SIZE) throw std::runtime_error("Recv size too large for kernel bank");
 
-        // Read from RX buffer partition (Lower 8MB)
-        std::memcpy(data, mmap_ptr, size);
+        // Read from RX buffer partition (Bank 0 or Bank 1)
+        // Bank 0 starts at 0. Bank 1 starts at 4MB.
+        size_t offset = bank * LEAP_RX_BANK_SIZE;
+        std::memcpy(data, static_cast<uint8_t*>(mmap_ptr) + offset, size);
     }
 
     void KernelTransport::send_next(const void *data, size_t size) {

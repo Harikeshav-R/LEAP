@@ -10,8 +10,9 @@
 #include <cstring>
 
 namespace Inference {
-    KernelTransport::KernelTransport(std::string dest_ip, int port)
-        : dest_ip(std::move(dest_ip)), port(port) {
+    KernelTransport::KernelTransport(std::string dest_ip, int port, std::string next_ip, int next_port)
+        : dest_ip(std::move(dest_ip)), port(port), prev_ip(this->dest_ip), prev_port(port), 
+          next_ip(std::move(next_ip)), next_port(next_port) {
     }
 
     KernelTransport::~KernelTransport() {
@@ -36,14 +37,23 @@ namespace Inference {
             std::cerr << "Warning: Failed to set listening port in kernel" << std::endl;
         }
 
-        // Configure Destination IP for Sending
+        // Set Default Destination (Prev)
+        set_destination(prev_ip, prev_port);
+    }
+
+    void KernelTransport::set_destination(const std::string& ip, int target_port) {
         unsigned int ip_int;
-        if (inet_pton(AF_INET, dest_ip.c_str(), &ip_int) <= 0) {
-            throw std::runtime_error("Invalid IP for KernelTransport");
+        if (inet_pton(AF_INET, ip.c_str(), &ip_int) <= 0) {
+            throw std::runtime_error("Invalid IP for KernelTransport: " + ip);
         }
 
         if (ioctl(fd, LEAP_IOCTL_SET_DEST, &ip_int) < 0) {
             std::cerr << "Warning: Failed to set destination IP in kernel" << std::endl;
+        }
+        
+        unsigned short p = static_cast<unsigned short>(target_port);
+        if (ioctl(fd, LEAP_IOCTL_SET_TX_PORT, &p) < 0) {
+             std::cerr << "Warning: Failed to set TX port in kernel" << std::endl;
         }
     }
 
@@ -54,7 +64,6 @@ namespace Inference {
 
         // Zero-Copy Optimization with Double Buffering:
         // Copy to TX buffer partition (Upper 8MB)
-        // Offset = LEAP_BUFFER_SIZE
         uint8_t* tx_buffer = static_cast<uint8_t*>(mmap_ptr) + LEAP_BUFFER_SIZE;
         std::memcpy(tx_buffer, data, size);
 
@@ -74,7 +83,27 @@ namespace Inference {
         if (size > LEAP_BUFFER_SIZE) throw std::runtime_error("Recv size too large for kernel buffer");
 
         // Read from RX buffer partition (Lower 8MB)
-        // Offset = 0
         std::memcpy(data, mmap_ptr, size);
+    }
+
+    void KernelTransport::send_next(const void *data, size_t size) {
+        if (next_ip.empty()) throw std::runtime_error("Next IP not configured for KernelTransport");
+        set_destination(next_ip, next_port);
+        send(data, size);
+    }
+
+    void KernelTransport::recv_next(void *data, size_t size) {
+        // Kernel module is promiscuous on listening port, so just wait.
+        // TODO: We could add filtering in kernel if needed, but for now we trust the port.
+        recv(data, size);
+    }
+
+    void KernelTransport::send_prev(const void *data, size_t size) {
+        set_destination(prev_ip, prev_port);
+        send(data, size);
+    }
+
+    void KernelTransport::recv_prev(void *data, size_t size) {
+        recv(data, size);
     }
 }

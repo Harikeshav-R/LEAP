@@ -1,4 +1,5 @@
 #include "QuantizedTransformer.h"
+#include "../kernel/leap_protocol.h"
 #include <cmath>
 #include <unistd.h>
 #include <sys/mman.h>
@@ -948,6 +949,11 @@ namespace Inference {
             if (!dist_config.transport) throw std::runtime_error("Transport not set for master");
 
             // Combine Header and x into one buffer
+            // Safety check for kernel transport limits
+            if (sizeof(PacketHeader) + dim * sizeof(float) > LEAP_BUFFER_SIZE) {
+                throw std::runtime_error("Packet size exceeds LEAP_BUFFER_SIZE. Reduce model dimension or increase buffer size.");
+            }
+
             std::vector<char> buffer(sizeof(PacketHeader) + dim * sizeof(float));
             PacketHeader header{pos, flags};
             
@@ -957,7 +963,7 @@ namespace Inference {
             // Master sends to Next (Worker 1)
             dist_config.transport->send_next(buffer.data(), buffer.size());
 
-            if (flags & FLAG_NEED_REPLY) {
+            if (flags == FLAG_NEED_REPLY) {
                 // Receive result from Next (Worker 1)
                 dist_config.transport->recv_next(x, dim * sizeof(float));
             } else {
@@ -1006,7 +1012,7 @@ namespace Inference {
                     std::memcpy(buffer.data() + sizeof(PacketHeader), x, dim * sizeof(float));
                     dist_config.transport->send_next(buffer.data(), buffer.size());
 
-                    if (header.flags & FLAG_NEED_REPLY) {
+                    if (header.flags == FLAG_NEED_REPLY) {
                         // Wait for reply from Next
                         dist_config.transport->recv_next(x, dim * sizeof(float));
                         // Forward reply to Prev
@@ -1014,7 +1020,7 @@ namespace Inference {
                     }
                 } else {
                     // Tail: Send back if needed
-                    if (header.flags & FLAG_NEED_REPLY) {
+                    if (header.flags == FLAG_NEED_REPLY) {
                         dist_config.transport->send_prev(x, dim * sizeof(float));
                     }
                 }

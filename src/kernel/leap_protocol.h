@@ -22,6 +22,7 @@ typedef uint8_t __u8;
 #define LEAP_IOCTL_WAIT_DATA _IO(LEAP_IOCTL_MAGIC, 1)
 #define LEAP_IOCTL_SET_DEST  _IOW(LEAP_IOCTL_MAGIC, 2, unsigned int) // Set Dest IP (u32)
 #define LEAP_IOCTL_SET_PORT  _IOW(LEAP_IOCTL_MAGIC, 3, unsigned short) // Set Listen Port (u16)
+#define LEAP_IOCTL_SET_TX_PORT _IOW(LEAP_IOCTL_MAGIC, 5, unsigned short) // Set TX Port (u16)
 
 // Buffer Size (8MB)
 #define LEAP_BUFFER_SIZE (8 * 1024 * 1024)

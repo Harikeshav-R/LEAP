@@ -278,6 +278,11 @@ static long leap_dev_ioctl(struct file *filep, unsigned int cmd, unsigned long a
         listening_port = htons(port_arg);
         if (dest_port == htons(LEAP_PORT)) dest_port = htons(port_arg);
         return 0;
+    } else if (cmd == LEAP_IOCTL_SET_TX_PORT) {
+        unsigned short port_arg;
+        if (copy_from_user(&port_arg, (unsigned short __user *)arg, sizeof(port_arg))) return -EFAULT;
+        dest_port = htons(port_arg);
+        return 0;
     } else if (cmd == LEAP_IOCTL_SEND) {
         unsigned int data_len;
         if (copy_from_user(&data_len, (unsigned int __user *)arg, sizeof(data_len))) return -EFAULT;

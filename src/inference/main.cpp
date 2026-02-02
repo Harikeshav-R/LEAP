@@ -147,10 +147,6 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, cons
         }
 
         int flags = FLAG_NEED_REPLY;
-        if (user_idx < prompt_tokens.size() - 1) {
-            flags = FLAG_NO_REPLY;
-        }
-        
         if (user_idx < prompt_tokens.size()) {
             flags = FLAG_NO_REPLY;
         }
@@ -158,7 +154,11 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, cons
         float *logits = transformer->forward(token, pos, flags);
         
         if (flags == FLAG_NO_REPLY) {
-            next = 0; // Dummy
+            if (user_idx < prompt_tokens.size()) {
+                next = prompt_tokens[user_idx];
+            } else {
+                next = 0;
+            }
         } else {
             next = sampler->sample(logits);
         }
@@ -299,6 +299,10 @@ int main(int argc, char *argv[]) {
             if (split_layer <= 0 || split_layer >= transformer->config.n_layers) {
                 throw std::runtime_error("Invalid --split layer for master. Must be > 0 and < n_layers.");
             }
+            // Warning: No validation of worker config (gap check)
+            std::cerr << "Warning: Ensure the first worker is configured to start at layer " << split_layer 
+                      << " to avoid gaps or overlaps." << std::endl;
+
             if (next_host.empty() || next_port == 0) {
                 throw std::runtime_error("Master role requires --next-host and --next-port to connect to workers.");
             }
@@ -313,6 +317,9 @@ int main(int argc, char *argv[]) {
         } else if (dist_role == DistributedMode::Worker) {
             if (split_layer <= 0 || split_layer >= transformer->config.n_layers) {
                 throw std::runtime_error("Invalid --split layer for worker.");
+            }
+            if (end_layer <= split_layer) {
+                throw std::runtime_error("Invalid range: --end layer must be greater than --split layer for worker.");
             }
             
             if (transport_type == "tcp") {

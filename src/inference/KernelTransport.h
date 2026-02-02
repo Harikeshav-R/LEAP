@@ -23,6 +23,8 @@ namespace Inference {
         void recv_prev(void *data, size_t size) override;
 
     private:
+        void recv_internal(void *data, size_t size, bool update_prev);
+
         std::string dest_ip; // Current Dest IP
         int port;            // Listening Port
 

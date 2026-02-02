@@ -80,7 +80,7 @@ namespace Inference {
         }
     }
 
-    void KernelTransport::recv(void *data, const size_t size) {
+    void KernelTransport::recv_internal(void *data, const size_t size, bool update_prev) {
         // Wait for data to be ready (Kernel writes to Lower 8MB, split into 64 banks)
         // IOCTL returns the bank index (0 to 63)
         int bank = ioctl(fd, LEAP_IOCTL_WAIT_DATA, 0);
@@ -88,17 +88,19 @@ namespace Inference {
             throw std::runtime_error("IOCTL wait failed");
         }
 
-        // Learn Source IP/Port for this bank
-        leap_bank_metadata meta;
-        meta.bank_idx = bank;
-        if (ioctl(fd, LEAP_IOCTL_GET_BANK_SRC, &meta) >= 0) {
-            char ip_str[INET_ADDRSTRLEN];
-            if (inet_ntop(AF_INET, &meta.saddr, ip_str, INET_ADDRSTRLEN)) {
-                if (this->prev_ip != ip_str) {
-                    std::cout << "KernelTransport: Learned Prev IP: " << ip_str << " (Bank " << bank << ")" << std::endl;
-                    this->prev_ip = ip_str;
+        if (update_prev) {
+            // Learn Source IP/Port for this bank
+            leap_bank_metadata meta;
+            meta.bank_idx = bank;
+            if (ioctl(fd, LEAP_IOCTL_GET_BANK_SRC, &meta) >= 0) {
+                char ip_str[INET_ADDRSTRLEN];
+                if (inet_ntop(AF_INET, &meta.saddr, ip_str, INET_ADDRSTRLEN)) {
+                    if (this->prev_ip != ip_str) {
+                        std::cout << "KernelTransport: Learned Prev IP: " << ip_str << " (Bank " << bank << ")" << std::endl;
+                        this->prev_ip = ip_str;
+                    }
+                    this->prev_port = ntohs(meta.sport);
                 }
-                this->prev_port = ntohs(meta.sport);
             }
         }
 
@@ -110,6 +112,10 @@ namespace Inference {
         std::memcpy(data, static_cast<uint8_t*>(mmap_ptr) + offset, size);
     }
 
+    void KernelTransport::recv(void *data, const size_t size) {
+        recv_internal(data, size, false); // Default recv doesn't update prev by default safely
+    }
+
     void KernelTransport::send_next(const void *data, size_t size) {
         if (next_ip.empty()) throw std::runtime_error("Next IP not configured for KernelTransport");
         set_destination(next_ip, next_port);
@@ -117,9 +123,8 @@ namespace Inference {
     }
 
     void KernelTransport::recv_next(void *data, size_t size) {
-        // Kernel module is promiscuous on listening port, so just wait.
-        // TODO: We could add filtering in kernel if needed, but for now we trust the port.
-        recv(data, size);
+        // Recv from next node - DO NOT update prev_ip
+        recv_internal(data, size, false);
     }
 
     void KernelTransport::send_prev(const void *data, size_t size) {
@@ -131,6 +136,7 @@ namespace Inference {
     }
 
     void KernelTransport::recv_prev(void *data, size_t size) {
-        recv(data, size);
+        // Recv from prev node - Update prev_ip
+        recv_internal(data, size, true);
     }
 }

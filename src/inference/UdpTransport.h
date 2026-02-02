@@ -9,22 +9,32 @@
 namespace Inference {
     class UdpTransport : public Transport {
     public:
-        UdpTransport(std::string ip, int port, bool is_server);
+        UdpTransport(std::string ip, int port, bool is_server, std::string next_ip = "", int next_port = 0);
 
         ~UdpTransport() override;
 
         void initialize() override;
 
         void send(const void *data, size_t size) override;
-
         void recv(void *data, size_t size) override;
+
+        void send_next(const void *data, size_t size) override;
+        void recv_next(void *data, size_t size) override;
+        void send_prev(const void *data, size_t size) override;
+        void recv_prev(void *data, size_t size) override;
 
     private:
         std::string ip;
         int port;
         bool is_server;
+        std::string next_ip;
+        int next_port;
+
         int sockfd = -1;
-        sockaddr_in dest_addr{};
+        sockaddr_in prev_addr{};
+        sockaddr_in next_addr{};
+        bool prev_addr_set = false;
+        
         uint16_t seq_id = 0;
 
         // Buffer for reassembly

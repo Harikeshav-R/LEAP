@@ -505,7 +505,8 @@ err_device: device_destroy(leap_class, dev_no);
 err_class: class_destroy(leap_class);
 err_chrdev: unregister_chrdev_region(dev_no, 1);
 err_buffer: 
-    bitmap_free(rx_bitmap);
+    if (rx_bitmap[0]) bitmap_free(rx_bitmap[0]);
+    if (rx_bitmap[1]) bitmap_free(rx_bitmap[1]);
     vfree(leap_buffer);
     return ret;
 }

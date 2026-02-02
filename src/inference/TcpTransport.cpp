@@ -77,12 +77,17 @@ namespace Inference {
                 }
 
                 std::cout << "Connecting to next worker at " << next_ip << ":" << next_port << "..." << std::endl;
-                // Simple retry loop for connecting to next worker
-                int retries = 10;
+                // Retry loop with exponential backoff for connecting to next worker
+                int retries = 15;
+                int wait_time = 1;
                 while (connect(egress_fd, (struct sockaddr *) &next_addr, sizeof(next_addr)) < 0) {
-                    if (--retries == 0) throw std::runtime_error("Connection to next worker failed");
-                    std::cout << "Waiting for next worker..." << std::endl;
-                    sleep(1);
+                    if (--retries == 0) throw std::runtime_error("Connection to next worker failed. Ensure downstream nodes are started first.");
+                    
+                    std::cout << "Waiting for next worker... (retrying in " << wait_time << "s)" << std::endl;
+                    sleep(wait_time);
+                    
+                    wait_time *= 2;
+                    if (wait_time > 5) wait_time = 5;
                 }
 
                 setup_socket_low_latency(egress_fd);

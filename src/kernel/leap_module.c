@@ -158,16 +158,15 @@ static unsigned int leap_nf_hook(void *priv, struct sk_buff *skb, const struct n
 
     // Preliminary sequence check
     spin_lock(&rx_lock);
-    int16_t diff = (int16_t)(seq_id - active_seq_id);
-    if (diff > 0) {
+    // Relaxed check: Any change in sequence ID is treated as a new transaction.
+    // This allows receiving from multiple sources with different counters (e.g. Master seq=30000, Worker2 seq=1).
+    if (seq_id != active_seq_id) {
         active_seq_id = seq_id;
         atomic_set(&chunks_received, 0);
         // Reset bitmap for new sequence
         bitmap_zero(rx_bitmap, max_chunks);
-    } else if (diff < 0) {
-        spin_unlock(&rx_lock);
-        return NF_ACCEPT;
-    }
+    } 
+    // If seq_id == active_seq_id, we continue accumulating chunks.
     spin_unlock(&rx_lock);
 
     if (likely(leap_offset + data_len <= leap_buffer_size)) {

@@ -465,8 +465,6 @@ static int __init leap_init(void) {
         }
     }
 
-    spin_lock_init(&rx_lock);
-
     ret = alloc_chrdev_region(&dev_no, 0, 1, LEAP_DEVICE_NAME);
     if (ret < 0) goto err_buffer;
     major_number = MAJOR(dev_no);

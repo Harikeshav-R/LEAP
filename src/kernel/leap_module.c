@@ -47,7 +47,8 @@ module_param(busy_wait_limit, int, 0644);
 MODULE_PARM_DESC(busy_wait_limit, "Number of iterations to busy-wait for data before sleeping");
 
 // RX State
-static spinlock_t rx_lock;
+static spinlock_t rx_locks[LEAP_RX_BANKS];
+// Bank state (0 and 1)
 static uint16_t active_seq_ids[LEAP_RX_BANKS];
 static atomic_t chunks_received[LEAP_RX_BANKS];
 static unsigned int max_chunks_per_bank;
@@ -160,7 +161,7 @@ static unsigned int leap_nf_hook(void *priv, struct sk_buff *skb, const struct n
     if (unlikely(data_len < 0)) return NF_ACCEPT;
 
     // Preliminary sequence check
-    spin_lock(&rx_lock);
+    spin_lock(&rx_locks[bank]);
     // Relaxed check: Just track active seq for this bank.
     if (seq_id != active_seq_ids[bank]) {
         active_seq_ids[bank] = seq_id;
@@ -168,7 +169,7 @@ static unsigned int leap_nf_hook(void *priv, struct sk_buff *skb, const struct n
         // Reset bitmap for new sequence
         bitmap_zero(rx_bitmap[bank], max_chunks_per_bank);
     } 
-    spin_unlock(&rx_lock);
+    spin_unlock(&rx_locks[bank]);
 
     if (likely(leap_offset + data_len <= leap_buffer_size)) {
         int abs_offset = payload_offset + sizeof(struct leap_header);
@@ -177,7 +178,7 @@ static unsigned int leap_nf_hook(void *priv, struct sk_buff *skb, const struct n
 
         if (skb_copy_bits(skb, abs_offset, leap_buffer + leap_offset, data_len) < 0) return NF_ACCEPT;
 
-        spin_lock(&rx_lock);
+        spin_lock(&rx_locks[bank]);
         // Verify sequence is still active for this bank
         if (seq_id == active_seq_ids[bank]) {
             if (!test_and_set_bit(chunk_id, rx_bitmap[bank])) {
@@ -188,7 +189,7 @@ static unsigned int leap_nf_hook(void *priv, struct sk_buff *skb, const struct n
                 }
             }
         }
-        spin_unlock(&rx_lock);
+        spin_unlock(&rx_locks[bank]);
     }
 
     consume_skb(skb);
@@ -209,14 +210,14 @@ static int leap_dev_release(struct inode *inodep, struct file *filep) {
     dest_port = htons(LEAP_PORT);
 
     // Reset RX State
-    spin_lock_bh(&rx_lock);
     bitmap_zero(data_ready_map, LEAP_RX_BANKS);
     for (int i = 0; i < LEAP_RX_BANKS; i++) {
+        spin_lock_bh(&rx_locks[i]);
         active_seq_ids[i] = 0;
         atomic_set(&chunks_received[i], 0);
         if (rx_bitmap[i]) bitmap_zero(rx_bitmap[i], max_chunks_per_bank);
+        spin_unlock_bh(&rx_locks[i]);
     }
-    spin_unlock_bh(&rx_lock);
 
     return 0;
 }
@@ -287,10 +288,10 @@ static long leap_dev_ioctl(struct file *filep, unsigned int cmd, unsigned long a
             clear_bit(bank, data_ready_map);
             
             // Reset state for this bank immediately to prepare for next
-            spin_lock_bh(&rx_lock);
+            spin_lock_bh(&rx_locks[bank]);
             atomic_set(&chunks_received[bank], 0);
             if (rx_bitmap[bank]) bitmap_zero(rx_bitmap[bank], max_chunks_per_bank);
-            spin_unlock_bh(&rx_lock);
+            spin_unlock_bh(&rx_locks[bank]);
             
             return (long)bank; 
         }
@@ -452,6 +453,7 @@ static int __init leap_init(void) {
     // Initialize state
     bitmap_zero(data_ready_map, LEAP_RX_BANKS);
     for (int i = 0; i < LEAP_RX_BANKS; i++) {
+        spin_lock_init(&rx_locks[i]);
         active_seq_ids[i] = 0;
         atomic_set(&chunks_received[i], 0);
         rx_bitmap[i] = bitmap_zalloc(max_chunks_per_bank, GFP_KERNEL);

@@ -23,6 +23,13 @@ typedef uint8_t __u8;
 #define LEAP_IOCTL_SET_DEST  _IOW(LEAP_IOCTL_MAGIC, 2, unsigned int) // Set Dest IP (u32)
 #define LEAP_IOCTL_SET_PORT  _IOW(LEAP_IOCTL_MAGIC, 3, unsigned short) // Set Listen Port (u16)
 #define LEAP_IOCTL_SET_TX_PORT _IOW(LEAP_IOCTL_MAGIC, 5, unsigned short) // Set TX Port (u16)
+#define LEAP_IOCTL_GET_BANK_SRC _IOWR(LEAP_IOCTL_MAGIC, 6, struct leap_bank_metadata)
+
+struct leap_bank_metadata {
+    int bank_idx;
+    uint32_t saddr;
+    uint16_t sport;
+};
 
 // Buffer Size (8MB)
 #define LEAP_BUFFER_SIZE (8 * 1024 * 1024)

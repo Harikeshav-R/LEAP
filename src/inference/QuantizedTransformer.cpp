@@ -970,6 +970,7 @@ namespace Inference {
             if (flags == FLAG_NEED_REPLY) {
                 // Receive result from Next (Worker 1)
                 dist_config.transport->recv_next(x, dim * sizeof(float));
+                std::cout << "DEBUG: Master Recv Data[0..3]: " << x[0] << " " << x[1] << " " << x[2] << " " << x[3] << std::endl;
             } else {
                 // Fire and forget
                 return nullptr;
@@ -1006,7 +1007,8 @@ namespace Inference {
                 std::memcpy(&header, buffer.data(), sizeof(PacketHeader));
                 std::memcpy(x, buffer.data() + sizeof(PacketHeader), dim * sizeof(float));
 
-                std::cout << "DEBUG: Worker Recv PacketHeader: pos=" << header.pos << " flags=" << header.flags << std::endl;
+                std::cout << "DEBUG: Worker Recv PacketHeader: pos=" << header.pos << " flags=" << header.flags 
+                          << " (sizeof PacketHeader=" << sizeof(PacketHeader) << ")" << std::endl;
                 float* x_preview = (float*)x;
                 std::cout << "DEBUG: Worker Recv Data[0..3]: " << x_preview[0] << " " << x_preview[1] << " " << x_preview[2] << " " << x_preview[3] << std::endl;
 

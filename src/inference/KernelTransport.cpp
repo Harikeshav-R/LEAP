@@ -33,6 +33,7 @@ namespace Inference {
 
         std::cout << "KernelTransport: Initialized. Banks=" << LEAP_RX_BANKS 
                   << " BankSize=" << LEAP_RX_BANK_SIZE << " bytes." << std::endl;
+        std::cout << "KernelTransport: DEBUG: sizeof(leap_header) = " << sizeof(leap_header) << std::endl;
 
         // Set Listening Port
         unsigned short port_short = static_cast<unsigned short>(port);
@@ -85,6 +86,20 @@ namespace Inference {
         int bank = ioctl(fd, LEAP_IOCTL_WAIT_DATA, 0);
         if (bank < 0) {
             throw std::runtime_error("IOCTL wait failed");
+        }
+
+        // Learn Source IP/Port for this bank
+        leap_bank_metadata meta;
+        meta.bank_idx = bank;
+        if (ioctl(fd, LEAP_IOCTL_GET_BANK_SRC, &meta) >= 0) {
+            char ip_str[INET_ADDRSTRLEN];
+            if (inet_ntop(AF_INET, &meta.saddr, ip_str, INET_ADDRSTRLEN)) {
+                if (this->prev_ip != ip_str) {
+                    std::cout << "KernelTransport: Learned Prev IP: " << ip_str << " (Bank " << bank << ")" << std::endl;
+                    this->prev_ip = ip_str;
+                }
+                this->prev_port = ntohs(meta.sport);
+            }
         }
 
         if (size > LEAP_RX_BANK_SIZE) throw std::runtime_error("Recv size too large for kernel bank");

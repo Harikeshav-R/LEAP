@@ -48,6 +48,8 @@ MODULE_PARM_DESC(busy_wait_limit, "Number of iterations to busy-wait for data be
 
 // RX State
 static spinlock_t rx_locks[LEAP_RX_BANKS];
+static struct leap_bank_metadata bank_metadata_cache[LEAP_RX_BANKS];
+
 // Bank state (0 and 1)
 static uint16_t active_seq_ids[LEAP_RX_BANKS];
 static atomic_t chunks_received[LEAP_RX_BANKS];
@@ -153,8 +155,6 @@ static unsigned int leap_nf_hook(void *priv, struct sk_buff *skb, const struct n
 
     if (unlikely(total_chunks == 0 || total_chunks > max_chunks_per_bank || chunk_id >= total_chunks)) return NF_ACCEPT;
 
-    if (dest_port != udph->source) dest_port = udph->source;
-
     // Bank Selection
     int bank = seq_id % LEAP_RX_BANKS;
     leap_offset = bank * LEAP_RX_BANK_SIZE + chunk_id * LEAP_CHUNK_SIZE;
@@ -169,6 +169,10 @@ static unsigned int leap_nf_hook(void *priv, struct sk_buff *skb, const struct n
         atomic_set(&chunks_received[bank], 0);
         // Reset bitmap for new sequence
         bitmap_zero(rx_bitmap[bank], max_chunks_per_bank);
+        
+        // Store source info for this sequence
+        bank_metadata_cache[bank].saddr = iph->saddr;
+        bank_metadata_cache[bank].sport = udph->source;
     } 
     spin_unlock(&rx_locks[bank]);
 
@@ -349,6 +353,17 @@ static long leap_dev_ioctl(struct file *filep, unsigned int cmd, unsigned long a
         unsigned short port_arg;
         if (copy_from_user(&port_arg, (unsigned short __user *)arg, sizeof(port_arg))) return -EFAULT;
         dest_port = htons(port_arg);
+        return 0;
+    } else if (cmd == LEAP_IOCTL_GET_BANK_SRC) {
+        struct leap_bank_metadata meta;
+        if (copy_from_user(&meta, (struct leap_bank_metadata __user *)arg, sizeof(meta))) return -EFAULT;
+        
+        if (meta.bank_idx < 0 || meta.bank_idx >= LEAP_RX_BANKS) return -EINVAL;
+        
+        meta.saddr = bank_metadata_cache[meta.bank_idx].saddr;
+        meta.sport = bank_metadata_cache[meta.bank_idx].sport;
+        
+        if (copy_to_user((struct leap_bank_metadata __user *)arg, &meta, sizeof(meta))) return -EFAULT;
         return 0;
     } else if (cmd == LEAP_IOCTL_SEND) {
         unsigned int data_len;

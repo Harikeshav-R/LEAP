@@ -195,6 +195,8 @@ int main(int argc, char *argv[]) {
     std::string ip = "0.0.0.0";
     std::string master_ip = "";
     int port = 9999;
+    std::string next_host = "";
+    int next_port = 0;
     int split_layer = 0;
 
     if (argc >= 2) {
@@ -211,6 +213,8 @@ int main(int argc, char *argv[]) {
         else if (arg == "--ip") ip = argv[i + 1];
         else if (arg == "--master-ip") master_ip = argv[i + 1];
         else if (arg == "--port") port = std::stoi(argv[i + 1]);
+        else if (arg == "--next-host") next_host = argv[i + 1];
+        else if (arg == "--next-port") next_port = std::stoi(argv[i + 1]);
         else if (arg == "--split") split_layer = std::stoi(argv[i + 1]);
         else if (arg[0] == '-') {
             if (arg.length() != 2) error_usage();
@@ -227,6 +231,8 @@ int main(int argc, char *argv[]) {
             error_usage();
         }
     }
+
+    if (next_port == 0) next_port = port;
 
     if (rng_seed <= 0) rng_seed = static_cast<unsigned int>(std::time(nullptr));
     if (temperature < 0.0) temperature = 0.0;
@@ -258,7 +264,7 @@ int main(int argc, char *argv[]) {
                 std::cerr << "Invalid split layer for master mode" << std::endl;
                 return 1;
             }
-            transport = std::make_unique<TcpTransport>(ip, port, false);
+            transport = std::make_unique<TcpTransport>(ip, port, false, next_host, next_port);
             transport->initialize();
         } else if (dist_mode_str == "worker") {
             dist_mode = DistributedMode::Worker;
@@ -266,7 +272,7 @@ int main(int argc, char *argv[]) {
                 std::cerr << "Invalid split layer for worker mode" << std::endl;
                 return 1;
             }
-            transport = std::make_unique<TcpTransport>(ip, port, true);
+            transport = std::make_unique<TcpTransport>(ip, port, true, next_host, next_port);
             transport->initialize();
         } else if (dist_mode_str == "udp") {
             // UDP Mode (Standard User Space UDP)
@@ -277,11 +283,11 @@ int main(int argc, char *argv[]) {
             return 1;
         } else if (dist_mode_str == "master-udp") {
             dist_mode = DistributedMode::Master;
-            transport = std::make_unique<UdpTransport>(ip, port, false);
+            transport = std::make_unique<UdpTransport>(ip, port, false, next_host, next_port);
             transport->initialize();
         } else if (dist_mode_str == "worker-udp") {
             dist_mode = DistributedMode::Worker;
-            transport = std::make_unique<UdpTransport>(ip, port, true);
+            transport = std::make_unique<UdpTransport>(ip, port, true, next_host, next_port);
             transport->initialize();
         } else if (dist_mode_str == "worker-kernel") {
 #ifndef __linux__
@@ -290,7 +296,8 @@ int main(int argc, char *argv[]) {
 #else
             dist_mode = DistributedMode::Worker;
             // For worker-kernel, we need the Master's IP to set as destination
-            std::string target_ip = master_ip.empty() ? ip : master_ip;
+            // If next_host is provided (Ring Mode), use that. Otherwise use master_ip (Legacy).
+            std::string target_ip = !next_host.empty() ? next_host : (master_ip.empty() ? ip : master_ip);
             transport = std::make_unique<KernelTransport>(target_ip, port);
             transport->initialize();
 #endif

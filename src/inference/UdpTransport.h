@@ -9,7 +9,8 @@
 namespace Inference {
     class UdpTransport : public Transport {
     public:
-        UdpTransport(std::string ip, int port, bool is_server);
+        // If next_ip is provided, enables Ring Mode (Send to next_ip:next_port)
+        UdpTransport(std::string ip, int port, bool is_server, std::string next_ip = "", int next_port = 0);
 
         ~UdpTransport() override;
 
@@ -23,6 +24,9 @@ namespace Inference {
         std::string ip;
         int port;
         bool is_server;
+        std::string next_ip;
+        int next_port;
+
         int sockfd = -1;
         sockaddr_in dest_addr{};
         uint16_t seq_id = 0;

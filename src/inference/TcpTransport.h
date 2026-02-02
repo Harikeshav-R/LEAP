@@ -9,7 +9,8 @@ namespace Inference {
     public:
         // is_server = true -> Worker (listens)
         // is_server = false -> Master (connects)
-        TcpTransport(std::string ip, int port, bool is_server);
+        // If next_ip is provided, enables Ring Mode (Listen on port, Connect to next_ip:next_port)
+        TcpTransport(std::string ip, int port, bool is_server, std::string next_ip = "", int next_port = 0);
 
         ~TcpTransport() override;
 
@@ -23,8 +24,12 @@ namespace Inference {
         std::string ip;
         int port;
         bool is_server;
-        int sockfd = -1;
-        int clientfd = -1; // For server mode, the connected client
+        std::string next_ip;
+        int next_port;
+
+        int sockfd = -1;   // Input Listener (if server/ring) or Connection (if client legacy)
+        int clientfd = -1; // Accepted Input Connection (if server/ring)
+        int connfd = -1;   // Output Connection (if ring)
 
         void setup_socket_low_latency(int fd);
     };

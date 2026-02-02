@@ -9,8 +9,8 @@
 #include <algorithm>
 
 namespace Inference {
-    UdpTransport::UdpTransport(std::string ip, const int port, const bool is_server)
-        : ip(std::move(ip)), port(port), is_server(is_server) {
+    UdpTransport::UdpTransport(std::string ip, const int port, const bool is_server, std::string next_ip, int next_port)
+        : ip(std::move(ip)), port(port), is_server(is_server), next_ip(std::move(next_ip)), next_port(next_port) {
         reassembly_buffer.resize(LEAP_BUFFER_SIZE);
     }
 
@@ -23,20 +23,42 @@ namespace Inference {
         if (sockfd < 0) throw std::runtime_error("Socket creation failed");
 
         memset(&dest_addr, 0, sizeof(dest_addr));
-        dest_addr.sin_family = AF_INET;
-        dest_addr.sin_port = htons(port);
+        
+        // Setup Listening (Bind)
+        sockaddr_in bind_addr{};
+        bind_addr.sin_family = AF_INET;
+        bind_addr.sin_port = htons(port);
+        bind_addr.sin_addr.s_addr = INADDR_ANY;
 
-        if (is_server) {
-            dest_addr.sin_addr.s_addr = INADDR_ANY;
-            if (bind(sockfd, (struct sockaddr *) &dest_addr, sizeof(dest_addr)) < 0) {
+        // In Ring Mode or Server Mode, we must bind to a specific port
+        // In Client Mode (Legacy), we can bind to any port (OS chooses)
+        if (is_server || !next_ip.empty()) {
+            if (bind(sockfd, (struct sockaddr *) &bind_addr, sizeof(bind_addr)) < 0) {
                 throw std::runtime_error("Bind failed");
             }
-            std::cout << "UDP Worker listening on port " << port << "..." << std::endl;
-        } else {
+            std::cout << "UDP listening on port " << port << "..." << std::endl;
+        }
+
+        // Setup Sending Destination
+        dest_addr.sin_family = AF_INET;
+        
+        if (!next_ip.empty()) {
+            // Ring Mode: Always send to Next Node
+            dest_addr.sin_port = htons(next_port);
+            if (inet_pton(AF_INET, next_ip.c_str(), &dest_addr.sin_addr) <= 0) {
+                throw std::runtime_error("Invalid next_ip");
+            }
+            std::cout << "Ring Mode: Sending to " << next_ip << ":" << next_port << std::endl;
+        } else if (!is_server) {
+            // Legacy Client: Send to Worker
+            dest_addr.sin_port = htons(port); // Legacy uses same port for target
             if (inet_pton(AF_INET, ip.c_str(), &dest_addr.sin_addr) <= 0) {
                 throw std::runtime_error("Invalid IP");
             }
-            std::cout << "UDP Master ready. Sending to " << ip << ":" << port << std::endl;
+            std::cout << "Legacy Master: Sending to " << ip << ":" << port << std::endl;
+        } else {
+            // Legacy Server: Dest unknown until first packet
+            dest_addr.sin_addr.s_addr = INADDR_ANY;
         }
     }
 
@@ -77,7 +99,6 @@ namespace Inference {
         // Naive reassembly: assumes packets arrive in order and no loss (LAN assumption)
         // A robust implementation would use a map/buffer to handle out-of-order packets.
         size_t received_bytes = 0;
-        uint8_t expected_chunk = 0;
         auto *out_bytes = static_cast<uint8_t *>(data);
 
         while (received_bytes < size) {
@@ -90,14 +111,11 @@ namespace Inference {
 
             if (len < 0) throw std::runtime_error("UDP recv failed");
 
-            // If we are a worker (server), remember who sent us data so we can reply
-            if (is_server &&dest_addr
-            .
-            sin_addr.s_addr == INADDR_ANY
-            )
-            {
+            // If we are a legacy worker (server) and haven't locked target, remember who sent us data
+            // In Ring Mode (!next_ip.empty()), we NEVER update dest_addr from recv
+            if (is_server && next_ip.empty() && dest_addr.sin_addr.s_addr == INADDR_ANY) {
                 dest_addr = src_addr;
-                std::cout << "Worker: Locked onto Master at " << inet_ntoa(src_addr.sin_addr)
+                std::cout << "Legacy Worker: Locked onto Master at " << inet_ntoa(src_addr.sin_addr)
                         << ":" << ntohs(src_addr.sin_port) << std::endl;
             }
 

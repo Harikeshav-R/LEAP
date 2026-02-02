@@ -60,6 +60,7 @@ static unsigned int dest_ip = 0;
 static uint16_t dest_port = htons(LEAP_PORT);
 static uint16_t listening_port = htons(LEAP_PORT);
 static atomic_t global_seq_id = ATOMIC_INIT(0);
+static DEFINE_MUTEX(tx_lock);
 
 // Netfilter Hook (RX)
 static struct nf_hook_ops leap_nf_ops;
@@ -231,14 +232,23 @@ static ssize_t leap_dev_write(struct file *filep, const char __user *buffer, siz
     void *kbuf;
 
     if (len > leap_buffer_size) return -EMSGSIZE;
-    if (!tx_socket) return -EIO;
+    
+    mutex_lock(&tx_lock);
+    if (!tx_socket) {
+        mutex_unlock(&tx_lock);
+        return -EIO;
+    }
 
     total_chunks = (len + LEAP_CHUNK_SIZE - 1) / LEAP_CHUNK_SIZE;
     kbuf = vmalloc(len);
-    if (!kbuf) return -ENOMEM;
+    if (!kbuf) {
+        mutex_unlock(&tx_lock);
+        return -ENOMEM;
+    }
 
     if (copy_from_user(kbuf, buffer, len)) {
         vfree(kbuf);
+        mutex_unlock(&tx_lock);
         return -EFAULT;
     }
 
@@ -250,6 +260,7 @@ static ssize_t leap_dev_write(struct file *filep, const char __user *buffer, siz
         cond_resched();
     }
     vfree(kbuf);
+    mutex_unlock(&tx_lock);
     return len;
 }
 
@@ -278,6 +289,7 @@ static long leap_dev_ioctl(struct file *filep, unsigned int cmd, unsigned long a
 
         if (copy_from_user(&port_arg, (unsigned short __user *)arg, sizeof(port_arg))) return -EFAULT;
         
+        mutex_lock(&tx_lock);
         listening_port = htons(port_arg);
         if (dest_port == htons(LEAP_PORT)) dest_port = htons(port_arg);
 
@@ -291,6 +303,7 @@ static long leap_dev_ioctl(struct file *filep, unsigned int cmd, unsigned long a
         ret = sock_create_kern(&init_net, PF_INET, SOCK_DGRAM, IPPROTO_UDP, &tx_socket);
         if (ret < 0) {
             pr_err("LEAP: Failed to recreate TX socket: %d\n", ret);
+            mutex_unlock(&tx_lock);
             return ret;
         }
 
@@ -302,10 +315,12 @@ static long leap_dev_ioctl(struct file *filep, unsigned int cmd, unsigned long a
         ret = kernel_bind(tx_socket, (struct sockaddr *)&bind_addr, sizeof(bind_addr));
         if (ret < 0) {
             pr_err("LEAP: Failed to bind TX socket to %d: %d\n", port_arg, ret);
+            mutex_unlock(&tx_lock);
             return ret;
         }
         
         if (tx_socket->sk) tx_socket->sk->sk_no_check_tx = 1;
+        mutex_unlock(&tx_lock);
 
         return 0;
     } else if (cmd == LEAP_IOCTL_SET_TX_PORT) {
@@ -316,7 +331,12 @@ static long leap_dev_ioctl(struct file *filep, unsigned int cmd, unsigned long a
     } else if (cmd == LEAP_IOCTL_SEND) {
         unsigned int data_len;
         if (copy_from_user(&data_len, (unsigned int __user *)arg, sizeof(data_len))) return -EFAULT;
-        if (data_len > leap_buffer_size || !tx_socket) return -EINVAL;
+        
+        mutex_lock(&tx_lock);
+        if (data_len > leap_buffer_size || !tx_socket) {
+            mutex_unlock(&tx_lock);
+            return -EINVAL;
+        }
 
         uint16_t total_chunks = (data_len + LEAP_CHUNK_SIZE - 1) / LEAP_CHUNK_SIZE;
         uint16_t current_seq = (uint16_t)atomic_inc_return(&global_seq_id);
@@ -331,6 +351,7 @@ static long leap_dev_ioctl(struct file *filep, unsigned int cmd, unsigned long a
             if (unlikely(processed + chunk_len > leap_buffer_size)) {
                 pr_err("LEAP: Buffer overflow detected in IOCTL_SEND! processed=%zu, chunk=%zu, max=%lu\n", 
                        processed, chunk_len, leap_buffer_size);
+                mutex_unlock(&tx_lock);
                 return -EFAULT;
             }
 
@@ -338,6 +359,7 @@ static long leap_dev_ioctl(struct file *filep, unsigned int cmd, unsigned long a
             processed += chunk_len;
             cond_resched();
         }
+        mutex_unlock(&tx_lock);
         return data_len;
     }
     return -EINVAL;

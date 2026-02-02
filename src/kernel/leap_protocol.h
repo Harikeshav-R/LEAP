@@ -36,6 +36,7 @@ struct leap_header {
     __be16 seq_id;
     __be16 chunk_id;
     __be16 total_chunks;
+    __be16 reserved; // Explicit padding to 12 bytes for alignment safety
 } __attribute__((packed));
 
 /*

@@ -31,6 +31,9 @@ namespace Inference {
             throw std::runtime_error(std::string("Failed to mmap kernel buffer: ") + std::strerror(errno));
         }
 
+        std::cout << "KernelTransport: Initialized. Banks=" << LEAP_RX_BANKS 
+                  << " BankSize=" << LEAP_RX_BANK_SIZE << " bytes." << std::endl;
+
         // Set Listening Port
         unsigned short port_short = static_cast<unsigned short>(port);
         if (ioctl(fd, LEAP_IOCTL_SET_PORT, &port_short) < 0) {
@@ -77,8 +80,8 @@ namespace Inference {
     }
 
     void KernelTransport::recv(void *data, const size_t size) {
-        // Wait for data to be ready (Kernel writes to Lower 8MB, split into 2 banks)
-        // IOCTL returns the bank index (0 or 1)
+        // Wait for data to be ready (Kernel writes to Lower 8MB, split into 64 banks)
+        // IOCTL returns the bank index (0 to 63)
         int bank = ioctl(fd, LEAP_IOCTL_WAIT_DATA, 0);
         if (bank < 0) {
             throw std::runtime_error("IOCTL wait failed");
@@ -86,8 +89,8 @@ namespace Inference {
 
         if (size > LEAP_RX_BANK_SIZE) throw std::runtime_error("Recv size too large for kernel bank");
 
-        // Read from RX buffer partition (Bank 0 or Bank 1)
-        // Bank 0 starts at 0. Bank 1 starts at 4MB.
+        // Read from RX buffer partition (Bank 0 to 63)
+        // Bank Size = 128KB (LEAP_BUFFER_SIZE / 64)
         size_t offset = bank * LEAP_RX_BANK_SIZE;
         std::memcpy(data, static_cast<uint8_t*>(mmap_ptr) + offset, size);
     }

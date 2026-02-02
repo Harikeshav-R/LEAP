@@ -1,4 +1,5 @@
 #include "FloatTransformer.h"
+#include "../kernel/leap_protocol.h"
 #include <cmath>
 #include <unistd.h>
 #include <sys/mman.h>
@@ -685,6 +686,11 @@ namespace Inference {
             if (!dist_config.transport) throw std::runtime_error("Transport not set for master");
 
             // Combine Header and x into one buffer
+            // Safety check for kernel transport limits
+            if (sizeof(PacketHeader) + dim * sizeof(float) > LEAP_BUFFER_SIZE) {
+                throw std::runtime_error("Packet size exceeds LEAP_BUFFER_SIZE. Reduce model dimension or increase buffer size.");
+            }
+
             std::vector<char> buffer(sizeof(PacketHeader) + dim * sizeof(float));
             PacketHeader header{pos, flags};
             
@@ -694,7 +700,7 @@ namespace Inference {
             // Master sends to Next (Worker 1)
             dist_config.transport->send_next(buffer.data(), buffer.size());
 
-            if (flags & FLAG_NEED_REPLY) {
+            if (flags == FLAG_NEED_REPLY) {
                 // Receive result from Next (Worker 1)
                 dist_config.transport->recv_next(x, dim * sizeof(float));
             } else {
@@ -717,88 +723,8 @@ namespace Inference {
         PacketHeader header{};
 
         const int start_layer = dist_config.split_layer;
-        int end_layer = config.n_layers;
         
-        // If we are not tail, we process up to next split. 
-        // But currently config.split_layer is "start layer for this worker".
-        // Where is "end layer"?
-        // Protocol assumption: 
-        // Master: 0 to split_layer.
-        // Worker 1: split_layer to ??? 
-        // 
-        // For simplicity in this plan:
-        // Chain: M -> W1 -> W2 (Tail).
-        // Each node needs to know its range.
-        // Current implementation only has 'split_layer'. 
-        // If DistributedConfig only has 'split_layer', it implies:
-        // Master runs 0..split_layer.
-        // Worker runs split_layer..n_layers.
-        // 
-        // With Chain:
-        // We need to know where the NEXT split is.
-        // Ideally, we should pass 'n_layers' or 'end_layer' to worker.
-        // Or simpler: each worker runs from 'split_layer' to END? 
-        // No, that duplicates work.
-        //
-        // Workaround: We will assume for now that if there is a Next Node,
-        // we run from 'split_layer' to 'next_worker_split_layer'.
-        // But we don't know next worker's split layer.
-        //
-        // Let's assume for this specific task based on standard pipeline parallelism:
-        // User provides --split 16.
-        // Master runs 0-15.
-        // Worker runs 16-31.
-        // If we are chaining, we need to specify ranges.
-        // 
-        // However, the current CLI only supports one `--split` arg.
-        // This implies the CLI is currently designed for 2 nodes (Master + Worker).
-        // To support N nodes properly, we'd need multiple split points or configuration.
-        //
-        // HACK/ASSUMPTION for Plan:
-        // If we are Middle Worker, we need to know how many layers WE run.
-        // The plan says: "Runs layers [split_layer_prev, split_layer_next)".
-        // 
-        // Since we can't easily change the CLI arg structure significantly without breaking things or making it complex:
-        // Let's assume the user configures the worker with the correct 'split' layer as its START.
-        // And if it connects to another worker, it needs to know when to stop.
-        // 
-        // Let's modify the CLI later to allow specifying 'layers' count or 'end_layer'.
-        // For now, let's assume specific behavior:
-        // - Tail Worker runs until `config.n_layers`.
-        // - Middle Worker runs until ???
-        // 
-        // The Plan says: "Runs layers [split_layer_prev, split_layer_next)".
-        // We need 'split_layer_next'.
-        //
-        // Let's add 'end_layer' to DistributedConfig or just 'n_layers_to_run'.
-        // I will stick to 'n_layers' for now (Tail behavior) if 'end_layer' is not provided.
-        // But wait, if Middle worker runs to end, and passes to Next, Next runs... what?
-        //
-        // If Middle Worker runs layers 16-31, and Next runs 32-48.
-        // Middle needs to stop at 32.
-        //
-        // Let's change `worker_loop` to start from `dist_config.split_layer`.
-        // But we need to know where to stop.
-        //
-        // Alternative: Pass the 'current layer' in the packet?
-        // No, `pos` is token position.
-        //
-        // Let's look at `main.cpp` args again.
-        // We have `--split`.
-        //
-        // Proposed fix:
-        // Use `--split` to mean "Start Layer".
-        // Use a NEW arg `--end-layer` (default n_layers).
-        // 
-        // So I will modify `worker_loop` to use `dist_config.end_layer` if available.
-        // I need to add `end_layer` to `DistributedConfig`.
-        // 
-        // In `Transformer.h`, I already edited `DistributedConfig`. I'll assume I can add `end_layer`.
-        // I will edit `Transformer.h` AGAIN to add `end_layer`.
-        //
-        // Wait, I should have thought of this.
-        // Let's add `end_layer` to `DistributedConfig` in `Transformer.h` first.
-        
+        // Process layers assigned to this worker [split_layer, end_layer)
         std::vector<char> buffer(sizeof(PacketHeader) + dim * sizeof(float));
 
         std::cout << "Worker started. Processing layers " << start_layer << " to " << dist_config.end_layer - 1 << std::endl;
@@ -822,7 +748,7 @@ namespace Inference {
                     std::memcpy(buffer.data() + sizeof(PacketHeader), x, dim * sizeof(float));
                     dist_config.transport->send_next(buffer.data(), buffer.size());
 
-                    if (header.flags & FLAG_NEED_REPLY) {
+                    if (header.flags == FLAG_NEED_REPLY) {
                         // Wait for reply from Next
                         dist_config.transport->recv_next(x, dim * sizeof(float));
                         // Forward reply to Prev
@@ -831,7 +757,7 @@ namespace Inference {
                     // If NO_REPLY, we are done with this token for this direction.
                 } else {
                     // Tail: Send back if needed
-                    if (header.flags & FLAG_NEED_REPLY) {
+                    if (header.flags == FLAG_NEED_REPLY) {
                         dist_config.transport->send_prev(x, dim * sizeof(float));
                     }
                 }

@@ -96,12 +96,14 @@ namespace Inference {
     }
 
     void UdpTransport::recv_next(void *data, size_t size) {
-        // Recv from next_addr (downstream)
-        size_t received_bytes = 0;
+        size_t expected_chunks = (size + LEAP_CHUNK_SIZE - 1) / LEAP_CHUNK_SIZE;
+        std::vector<bool> received_chunks(expected_chunks, false);
+        size_t chunks_count = 0;
         auto *out_bytes = static_cast<uint8_t *>(data);
+        int32_t active_seq_id = -1;
+        std::vector<uint8_t> packet(2048);
 
-        while (received_bytes < size) {
-            std::vector<uint8_t> packet(2048);
+        while (chunks_count < expected_chunks) {
             sockaddr_in src_addr;
             socklen_t addr_len = sizeof(src_addr);
 
@@ -114,11 +116,26 @@ namespace Inference {
             auto *hdr = reinterpret_cast<leap_header *>(packet.data());
             if (ntohl(hdr->magic) != LEAP_MAGIC) continue;
 
-            size_t payload_len = len - sizeof(leap_header);
-            if (received_bytes + payload_len > size) payload_len = size - received_bytes;
+            uint16_t seq = ntohs(hdr->seq_id);
+            uint16_t chunk = ntohs(hdr->chunk_id);
 
-            std::memcpy(out_bytes + received_bytes, packet.data() + sizeof(leap_header), payload_len);
-            received_bytes += payload_len;
+            if (active_seq_id == -1) {
+                active_seq_id = seq;
+            } else if (seq != active_seq_id) {
+                continue;
+            }
+
+            if (chunk >= expected_chunks) continue;
+            if (received_chunks[chunk]) continue;
+
+            size_t payload_len = len - sizeof(leap_header);
+            size_t offset = chunk * LEAP_CHUNK_SIZE;
+
+            if (offset + payload_len > size) payload_len = size - offset;
+
+            std::memcpy(out_bytes + offset, packet.data() + sizeof(leap_header), payload_len);
+            received_chunks[chunk] = true;
+            chunks_count++;
         }
     }
 
@@ -157,11 +174,14 @@ namespace Inference {
     }
 
     void UdpTransport::recv_prev(void *data, size_t size) {
-        size_t received_bytes = 0;
+        size_t expected_chunks = (size + LEAP_CHUNK_SIZE - 1) / LEAP_CHUNK_SIZE;
+        std::vector<bool> received_chunks(expected_chunks, false);
+        size_t chunks_count = 0;
         auto *out_bytes = static_cast<uint8_t *>(data);
+        int32_t active_seq_id = -1;
+        std::vector<uint8_t> packet(2048);
 
-        while (received_bytes < size) {
-            std::vector<uint8_t> packet(2048);
+        while (chunks_count < expected_chunks) {
             sockaddr_in src_addr;
             socklen_t addr_len = sizeof(src_addr);
 
@@ -182,11 +202,26 @@ namespace Inference {
             auto *hdr = reinterpret_cast<leap_header *>(packet.data());
             if (ntohl(hdr->magic) != LEAP_MAGIC) continue;
 
-            size_t payload_len = len - sizeof(leap_header);
-            if (received_bytes + payload_len > size) payload_len = size - received_bytes;
+            uint16_t seq = ntohs(hdr->seq_id);
+            uint16_t chunk = ntohs(hdr->chunk_id);
 
-            std::memcpy(out_bytes + received_bytes, packet.data() + sizeof(leap_header), payload_len);
-            received_bytes += payload_len;
+            if (active_seq_id == -1) {
+                active_seq_id = seq;
+            } else if (seq != active_seq_id) {
+                continue;
+            }
+
+            if (chunk >= expected_chunks) continue;
+            if (received_chunks[chunk]) continue;
+
+            size_t payload_len = len - sizeof(leap_header);
+            size_t offset = chunk * LEAP_CHUNK_SIZE;
+
+            if (offset + payload_len > size) payload_len = size - offset;
+
+            std::memcpy(out_bytes + offset, packet.data() + sizeof(leap_header), payload_len);
+            received_chunks[chunk] = true;
+            chunks_count++;
         }
     }
 }

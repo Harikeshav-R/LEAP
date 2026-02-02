@@ -33,7 +33,6 @@ namespace Inference {
 
         std::cout << "KernelTransport: Initialized. Banks=" << LEAP_RX_BANKS 
                   << " BankSize=" << LEAP_RX_BANK_SIZE << " bytes." << std::endl;
-        std::cout << "KernelTransport: DEBUG: sizeof(leap_header) = " << sizeof(leap_header) << std::endl;
 
         // Set Listening Port
         unsigned short port_short = static_cast<unsigned short>(port);

@@ -314,7 +314,7 @@ int main(int argc, char *argv[]) {
 #else
             dist_mode = DistributedMode::Worker;
             std::string target_ip = master_ip.empty() ? ip : master_ip;
-            transport = std::make_unique<KernelTransport>(target_ip, port);
+            transport = std::make_unique<KernelTransport>(target_ip, port, next_ip, next_port);
             transport->initialize();
 #endif
         } else if (dist_mode_str != "single") {

@@ -35,7 +35,11 @@ namespace Inference {
         sockaddr_in next_addr{};
         bool prev_addr_set = false;
         
-        // Start Master at a high offset to distinguish from Kernel defaults (0)
+        // Sequence ID strategy:
+        // Initialized to 0x8000 (32768) to provide a high-entropy start point that minimizes
+        // immediate collisions with other nodes (like KernelTransport) that may start at 0.
+        // In distributed pipelines with mixed transports, this offset helps the receiving
+        // kernel module distinguish new transactions. The ID wraps naturally as uint16_t.
         uint16_t seq_id = 0x8000; 
 
         // Buffer for reassembly

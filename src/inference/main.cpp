@@ -301,7 +301,8 @@ int main(int argc, char *argv[]) {
                 std::cerr << "Error: Master UDP mode requires --next-ip and --next-port." << std::endl;
                 return 1;
             }
-            transport = std::make_unique<UdpTransport>(next_ip, next_port, false);
+            // Bind to local ip:port, send to next_ip:next_port
+            transport = std::make_unique<UdpTransport>(ip, port, false, next_ip, next_port);
             transport->initialize();
         } else if (dist_mode_str == "worker-udp") {
             dist_mode = DistributedMode::Worker;

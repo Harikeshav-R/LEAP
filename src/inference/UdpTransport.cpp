@@ -103,6 +103,8 @@ namespace Inference {
         int32_t active_seq_id = -1;
         std::vector<uint8_t> packet(2048);
 
+        // std::cout << "UDP Recv: Expecting " << size << " bytes (" << expected_chunks << " chunks)" << std::endl;
+
         while (chunks_count < expected_chunks) {
             sockaddr_in src_addr;
             socklen_t addr_len = sizeof(src_addr);
@@ -121,7 +123,9 @@ namespace Inference {
 
             if (active_seq_id == -1) {
                 active_seq_id = seq;
+                std::cout << "UDP Lock: Seq 0x" << std::hex << seq << std::dec << std::endl;
             } else if (seq != active_seq_id) {
+                std::cout << "UDP Ignored: Seq 0x" << std::hex << seq << " (Active: 0x" << active_seq_id << ")" << std::dec << std::endl;
                 continue;
             }
 
@@ -132,6 +136,16 @@ namespace Inference {
             size_t offset = chunk * LEAP_CHUNK_SIZE;
 
             if (offset + payload_len > size) payload_len = size - offset;
+
+            // Debug first chunk data
+            if (chunk == 0) {
+                std::cout << "UDP Chunk 0 Data (Seq 0x" << std::hex << seq << "): ";
+                const uint8_t* p = packet.data() + sizeof(leap_header);
+                for(int i=0; i<std::min((size_t)16, payload_len); i++) {
+                     printf("%02X ", p[i]);
+                }
+                std::cout << std::dec << std::endl;
+            }
 
             std::memcpy(out_bytes + offset, packet.data() + sizeof(leap_header), payload_len);
             received_chunks[chunk] = true;

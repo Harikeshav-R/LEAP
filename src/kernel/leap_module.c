@@ -38,7 +38,7 @@ static unsigned long total_alloc_size; // 2 * LEAP_BUFFER_SIZE
 
 // Synchronization
 static DECLARE_WAIT_QUEUE_HEAD (leap_wait_queue);
-static atomic_t data_ready_mask = ATOMIC_INIT(0);
+static DECLARE_BITMAP(data_ready_map, LEAP_RX_BANKS);
 static atomic_t open_count = ATOMIC_INIT(0);
 
 // Module Parameters
@@ -48,11 +48,10 @@ MODULE_PARM_DESC(busy_wait_limit, "Number of iterations to busy-wait for data be
 
 // RX State
 static spinlock_t rx_lock;
-// Bank state (0 and 1)
-static uint16_t active_seq_ids[2] = {0, 0};
-static atomic_t chunks_received[2] = {ATOMIC_INIT(0), ATOMIC_INIT(0)};
+static uint16_t active_seq_ids[LEAP_RX_BANKS];
+static atomic_t chunks_received[LEAP_RX_BANKS];
 static unsigned int max_chunks_per_bank;
-static unsigned long *rx_bitmap[2] = {NULL, NULL};
+static unsigned long *rx_bitmap[LEAP_RX_BANKS];
 
 // Networking (TX)
 static struct socket *tx_socket = NULL;
@@ -155,7 +154,7 @@ static unsigned int leap_nf_hook(void *priv, struct sk_buff *skb, const struct n
     if (dest_port != udph->source) dest_port = udph->source;
 
     // Bank Selection
-    int bank = seq_id % 2;
+    int bank = seq_id % LEAP_RX_BANKS;
     leap_offset = bank * LEAP_RX_BANK_SIZE + chunk_id * LEAP_CHUNK_SIZE;
     int data_len = payload_len - sizeof(struct leap_header);
     if (unlikely(data_len < 0)) return NF_ACCEPT;
@@ -184,7 +183,7 @@ static unsigned int leap_nf_hook(void *priv, struct sk_buff *skb, const struct n
             if (!test_and_set_bit(chunk_id, rx_bitmap[bank])) {
                 if (atomic_inc_return(&chunks_received[bank]) == total_chunks) {
                     // Set ready bit for this bank
-                    atomic_or(1 << bank, &data_ready_mask);
+                    set_bit(bank, data_ready_map);
                     wake_up_interruptible(&leap_wait_queue);
                 }
             }
@@ -211,12 +210,12 @@ static int leap_dev_release(struct inode *inodep, struct file *filep) {
 
     // Reset RX State
     spin_lock_bh(&rx_lock);
-    active_seq_ids[0] = 0;
-    active_seq_ids[1] = 0;
-    atomic_set(&chunks_received[0], 0);
-    atomic_set(&chunks_received[1], 0);
-    if (rx_bitmap[0]) bitmap_zero(rx_bitmap[0], max_chunks_per_bank);
-    if (rx_bitmap[1]) bitmap_zero(rx_bitmap[1], max_chunks_per_bank);
+    bitmap_zero(data_ready_map, LEAP_RX_BANKS);
+    for (int i = 0; i < LEAP_RX_BANKS; i++) {
+        active_seq_ids[i] = 0;
+        atomic_set(&chunks_received[i], 0);
+        if (rx_bitmap[i]) bitmap_zero(rx_bitmap[i], max_chunks_per_bank);
+    }
     spin_unlock_bh(&rx_lock);
 
     return 0;
@@ -272,28 +271,20 @@ static long leap_dev_ioctl(struct file *filep, unsigned int cmd, unsigned long a
         int i;
         // Busy wait for ANY bank to be ready
         for (i = 0; i < busy_wait_limit; i++) {
-            if (atomic_read(&data_ready_mask) != 0) break;
+            if (!bitmap_empty(data_ready_map, LEAP_RX_BANKS)) break;
             cpu_relax();
         }
         
         // Sleep if still not ready
-        if (atomic_read(&data_ready_mask) == 0) {
-            if (wait_event_interruptible(leap_wait_queue, atomic_read(&data_ready_mask) != 0)) return -ERESTARTSYS;
+        if (bitmap_empty(data_ready_map, LEAP_RX_BANKS)) {
+            if (wait_event_interruptible(leap_wait_queue, !bitmap_empty(data_ready_map, LEAP_RX_BANKS))) return -ERESTARTSYS;
         }
 
         // Find which bank is ready
-        // Prioritize based on some logic? Or just check 0 then 1.
-        // We need to atomically claim a bank.
-        // But atomic_read + logic + atomic_and is racy if multiple readers?
-        // Single reader assumption (Worker loop is single threaded).
-        
-        int mask = atomic_read(&data_ready_mask);
-        int bank = -1;
-        if (mask & 1) bank = 0;
-        else if (mask & 2) bank = 1;
+        unsigned long bank = find_first_bit(data_ready_map, LEAP_RX_BANKS);
 
-        if (bank >= 0) {
-            atomic_and(~(1 << bank), &data_ready_mask);
+        if (bank < LEAP_RX_BANKS) {
+            clear_bit(bank, data_ready_map);
             
             // Reset state for this bank immediately to prepare for next
             spin_lock_bh(&rx_lock);
@@ -301,7 +292,7 @@ static long leap_dev_ioctl(struct file *filep, unsigned int cmd, unsigned long a
             if (rx_bitmap[bank]) bitmap_zero(rx_bitmap[bank], max_chunks_per_bank);
             spin_unlock_bh(&rx_lock);
             
-            return bank; // Return 0 or 1
+            return (long)bank; 
         }
         return -EAGAIN; // Should not happen if wait succeeded
     } else if (cmd == LEAP_IOCTL_SET_DEST) {
@@ -458,15 +449,18 @@ static int __init leap_init(void) {
     if (!leap_buffer) return -ENOMEM;
     memset(leap_buffer, 0, total_alloc_size);
 
-    // Allocate RX Bitmaps for Double Buffering
-    rx_bitmap[0] = bitmap_zalloc(max_chunks_per_bank, GFP_KERNEL);
-    rx_bitmap[1] = bitmap_zalloc(max_chunks_per_bank, GFP_KERNEL);
-    
-    if (!rx_bitmap[0] || !rx_bitmap[1]) {
-        vfree(leap_buffer);
-        if (rx_bitmap[0]) bitmap_free(rx_bitmap[0]);
-        if (rx_bitmap[1]) bitmap_free(rx_bitmap[1]);
-        return -ENOMEM;
+    // Initialize state
+    bitmap_zero(data_ready_map, LEAP_RX_BANKS);
+    for (int i = 0; i < LEAP_RX_BANKS; i++) {
+        active_seq_ids[i] = 0;
+        atomic_set(&chunks_received[i], 0);
+        rx_bitmap[i] = bitmap_zalloc(max_chunks_per_bank, GFP_KERNEL);
+        if (!rx_bitmap[i]) {
+            // Cleanup on failure
+            for (int j = 0; j < i; j++) bitmap_free(rx_bitmap[j]);
+            vfree(leap_buffer);
+            return -ENOMEM;
+        }
     }
 
     spin_lock_init(&rx_lock);
@@ -505,8 +499,9 @@ err_device: device_destroy(leap_class, dev_no);
 err_class: class_destroy(leap_class);
 err_chrdev: unregister_chrdev_region(dev_no, 1);
 err_buffer: 
-    if (rx_bitmap[0]) bitmap_free(rx_bitmap[0]);
-    if (rx_bitmap[1]) bitmap_free(rx_bitmap[1]);
+    for (int i = 0; i < LEAP_RX_BANKS; i++) {
+        if (rx_bitmap[i]) bitmap_free(rx_bitmap[i]);
+    }
     vfree(leap_buffer);
     return ret;
 }
@@ -519,8 +514,9 @@ static void __exit leap_exit(void) {
     device_destroy(leap_class, dev_no);
     class_destroy(leap_class);
     unregister_chrdev_region(dev_no, 1);
-    if (rx_bitmap[0]) bitmap_free(rx_bitmap[0]);
-    if (rx_bitmap[1]) bitmap_free(rx_bitmap[1]);
+    for (int i = 0; i < LEAP_RX_BANKS; i++) {
+        if (rx_bitmap[i]) bitmap_free(rx_bitmap[i]);
+    }
     vfree(leap_buffer);
 }
 

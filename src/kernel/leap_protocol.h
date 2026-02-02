@@ -26,7 +26,8 @@ typedef uint8_t __u8;
 
 // Buffer Size (8MB)
 #define LEAP_BUFFER_SIZE (8 * 1024 * 1024)
-#define LEAP_RX_BANK_SIZE (LEAP_BUFFER_SIZE / 2)
+#define LEAP_RX_BANKS 64
+#define LEAP_RX_BANK_SIZE (LEAP_BUFFER_SIZE / LEAP_RX_BANKS)
 #define LEAP_CHUNK_SIZE 1400
 
 // Packet Header structure

@@ -35,7 +35,8 @@ namespace Inference {
         sockaddr_in next_addr{};
         bool prev_addr_set = false;
         
-        uint16_t seq_id = 0;
+        // Start Master at a high offset to distinguish from Kernel defaults (0)
+        uint16_t seq_id = 0x8000; 
 
         // Buffer for reassembly
         std::vector<uint8_t> reassembly_buffer;

@@ -687,8 +687,8 @@ namespace Inference {
 
             // Combine Header and x into one buffer
             // Safety check for kernel transport limits
-            if (sizeof(PacketHeader) + dim * sizeof(float) > LEAP_BUFFER_SIZE) {
-                throw std::runtime_error("Packet size exceeds LEAP_BUFFER_SIZE. Reduce model dimension or increase buffer size.");
+            if (sizeof(PacketHeader) + dim * sizeof(float) > LEAP_RX_BANK_SIZE) {
+                throw std::runtime_error("Packet size exceeds LEAP_RX_BANK_SIZE. Reduce model dimension or increase buffer size.");
             }
 
             std::vector<char> buffer(sizeof(PacketHeader) + dim * sizeof(float));

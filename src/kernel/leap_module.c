@@ -273,9 +273,40 @@ static long leap_dev_ioctl(struct file *filep, unsigned int cmd, unsigned long a
         return 0;
     } else if (cmd == LEAP_IOCTL_SET_PORT) {
         unsigned short port_arg;
+        struct sockaddr_in bind_addr;
+        int ret;
+
         if (copy_from_user(&port_arg, (unsigned short __user *)arg, sizeof(port_arg))) return -EFAULT;
+        
         listening_port = htons(port_arg);
         if (dest_port == htons(LEAP_PORT)) dest_port = htons(port_arg);
+
+        // Re-create and bind TX socket to ensure Source Port == Listening Port
+        // This is critical for the receiving node to learn the correct return port
+        if (tx_socket) {
+            sock_release(tx_socket);
+            tx_socket = NULL;
+        }
+
+        ret = sock_create_kern(&init_net, PF_INET, SOCK_DGRAM, IPPROTO_UDP, &tx_socket);
+        if (ret < 0) {
+            pr_err("LEAP: Failed to recreate TX socket: %d\n", ret);
+            return ret;
+        }
+
+        memset(&bind_addr, 0, sizeof(bind_addr));
+        bind_addr.sin_family = AF_INET;
+        bind_addr.sin_port = listening_port;
+        bind_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+
+        ret = kernel_bind(tx_socket, (struct sockaddr *)&bind_addr, sizeof(bind_addr));
+        if (ret < 0) {
+            pr_err("LEAP: Failed to bind TX socket to %d: %d\n", port_arg, ret);
+            return ret;
+        }
+        
+        if (tx_socket->sk) tx_socket->sk->sk_no_check_tx = 1;
+
         return 0;
     } else if (cmd == LEAP_IOCTL_SET_TX_PORT) {
         unsigned short port_arg;

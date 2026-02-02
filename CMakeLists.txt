@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.28)
+cmake_minimum_required(VERSION 4.1)
 project(LEAP)
 
 option(BUILD_KERNEL_MODULE "Build the LEAP Linux Kernel Module" OFF)
@@ -54,6 +54,14 @@ FetchContent_Declare(
         GIT_TAG main
 )
 FetchContent_MakeAvailable(safetensors_cpp)
+
+# --- CLI11 ---
+FetchContent_Declare(
+        cli11
+        GIT_REPOSITORY https://github.com/CLIUtils/CLI11
+        GIT_TAG v2.6.1
+)
+FetchContent_MakeAvailable(cli11)
 
 # --- LibTorch ---
 set(CMAKE_PREFIX_PATH "${CMAKE_SOURCE_DIR}/third-party/libtorch" ${CMAKE_PREFIX_PATH})
@@ -178,6 +186,7 @@ target_link_libraries(export PRIVATE ${TORCH_LIBRARIES} model nlohmann_json::nlo
 # --- Target: Inference ---
 # Note: -ffast-math is already enabled globally above, but explicit options for headers are fine
 target_compile_options(inference PRIVATE $<$<CONFIG:Release>:-ffast-math>)
+target_link_libraries(inference PRIVATE CLI11::CLI11)
 
 # --- Target: Model ---
 target_include_directories(model PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/model)

@@ -957,10 +957,10 @@ namespace Inference {
             // Master sends to Next (Worker 1)
             dist_config.transport->send_next(buffer.data(), buffer.size());
 
-            if (flags == FLAG_NEED_REPLY) {
-                // In Ring Topology, Master receives result from Prev (Tail Worker)
-                dist_config.transport->recv_prev(x, dim * sizeof(float));
-            } else {
+            // Ring Synchronization: Always receive to clear buffer/maintain order
+            dist_config.transport->recv_prev(x, dim * sizeof(float));
+
+            if (flags != FLAG_NEED_REPLY) {
                 return nullptr;
             }
         }

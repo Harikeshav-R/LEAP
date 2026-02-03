@@ -694,10 +694,13 @@ namespace Inference {
             // Master sends to Next (Worker 1)
             dist_config.transport->send_next(buffer.data(), buffer.size());
 
-            if (flags == FLAG_NEED_REPLY) {
-                // In Ring Topology, Master receives result from Prev (Tail Worker)
-                dist_config.transport->recv_prev(x, dim * sizeof(float));
-            } else {
+            // Ring Synchronization:
+            // Master MUST always receive the result from the Tail Worker to maintain
+            // lock-step synchronization and clear the socket buffer.
+            // Even if flags == NO_REPLY, the data traveled the ring and is waiting at our door.
+            dist_config.transport->recv_prev(x, dim * sizeof(float));
+
+            if (flags != FLAG_NEED_REPLY) {
                 return nullptr;
             }
         }

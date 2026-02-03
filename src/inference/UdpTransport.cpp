@@ -12,6 +12,7 @@ namespace Inference {
     UdpTransport::UdpTransport(std::string ip, const int port, std::string next_ip, int next_port)
         : ip(std::move(ip)), port(port), next_ip(std::move(next_ip)), next_port(next_port) {
         reassembly_buffer.resize(LEAP_BUFFER_SIZE);
+        packet_buffer.resize(2048);
         memset(&prev_addr, 0, sizeof(prev_addr));
         memset(&next_addr, 0, sizeof(next_addr));
     }
@@ -69,17 +70,22 @@ namespace Inference {
             size_t chunk_len = LEAP_CHUNK_SIZE;
             if (processed + chunk_len > size) chunk_len = size - processed;
 
-            std::vector<uint8_t> packet(sizeof(leap_header) + chunk_len);
-            auto *hdr = reinterpret_cast<leap_header *>(packet.data());
+            // Reuse packet_buffer
+            // Ensure size
+            if (packet_buffer.size() < sizeof(leap_header) + chunk_len) {
+                 packet_buffer.resize(sizeof(leap_header) + chunk_len);
+            }
+
+            auto *hdr = reinterpret_cast<leap_header *>(packet_buffer.data());
 
             hdr->magic = htonl(LEAP_MAGIC);
             hdr->seq_id = htons(seq_id);
             hdr->chunk_id = htons(chunk_idx);
             hdr->total_chunks = htons(total_chunks);
 
-            std::memcpy(packet.data() + sizeof(leap_header), bytes + processed, chunk_len);
+            std::memcpy(packet_buffer.data() + sizeof(leap_header), bytes + processed, chunk_len);
 
-            if (sendto(sockfd, packet.data(), packet.size(), 0,
+            if (sendto(sockfd, packet_buffer.data(), sizeof(leap_header) + chunk_len, 0,
                        (struct sockaddr *) &next_addr, sizeof(next_addr)) < 0) {
                 throw std::runtime_error("UDP send next failed");
             }
@@ -103,13 +109,13 @@ namespace Inference {
         size_t chunks_count = 0;
         auto *out_bytes = static_cast<uint8_t *>(data);
         int32_t active_seq_id = -1;
-        std::vector<uint8_t> packet(2048);
+        // reuse member buffer packet_buffer
 
         while (chunks_count < expected_chunks) {
             sockaddr_in src_addr;
             socklen_t addr_len = sizeof(src_addr);
 
-            ssize_t len = recvfrom(sockfd, packet.data(), packet.size(), 0,
+            ssize_t len = recvfrom(sockfd, packet_buffer.data(), packet_buffer.size(), 0,
                                    (struct sockaddr *) &src_addr, &addr_len);
 
             if (len < 0) throw std::runtime_error("UDP recv prev failed");
@@ -122,7 +128,7 @@ namespace Inference {
 
             if (static_cast<size_t>(len) < sizeof(leap_header)) continue;
 
-            auto *hdr = reinterpret_cast<leap_header *>(packet.data());
+            auto *hdr = reinterpret_cast<leap_header *>(packet_buffer.data());
             if (ntohl(hdr->magic) != LEAP_MAGIC) continue;
 
             uint16_t seq = ntohs(hdr->seq_id);
@@ -142,7 +148,7 @@ namespace Inference {
 
             if (offset + payload_len > size) payload_len = size - offset;
 
-            std::memcpy(out_bytes + offset, packet.data() + sizeof(leap_header), payload_len);
+            std::memcpy(out_bytes + offset, packet_buffer.data() + sizeof(leap_header), payload_len);
             received_chunks[chunk] = true;
             chunks_count++;
         }

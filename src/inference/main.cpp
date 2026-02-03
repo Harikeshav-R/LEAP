@@ -204,9 +204,16 @@ int main(int argc, char *argv[]) {
     float temperature = 1.0f;
     app.add_option("--temp", temperature, "Sampling temperature")->capture_default_str();
 
+    float top_p = 0.9f;
+    app.add_option("--top-p", top_p, "Top-p (nucleus) sampling threshold (0.0-1.0)")->capture_default_str();
+
+    unsigned int seed = 0;
+    app.add_option("--seed", seed, "Random seed for reproducibility (0 = use current time)")->capture_default_str();
+
     CLI11_PARSE(app, argc, argv);
 
     try {
+        if (seed == 0) seed = static_cast<unsigned int>(std::time(nullptr));
         auto transformer = Transformer::create(model_path);
         if (end == 0) end = transformer->config.n_layers;
 
@@ -237,6 +244,8 @@ int main(int argc, char *argv[]) {
         dist_config.split_layer = split;
         dist_config.end_layer = end;
         dist_config.transport = transport.get();
+        // If this node processes the final layers, it is the tail of the pipeline
+        dist_config.is_tail = (end == transformer->config.n_layers);
         
         transformer->set_distributed_config(dist_config);
 
@@ -246,7 +255,7 @@ int main(int argc, char *argv[]) {
         }
 
         Tokenizer tokenizer(tokenizer_path, transformer->config.vocab_size);
-        Sampler sampler(transformer->config.vocab_size, temperature, 0.9f, 0);
+        Sampler sampler(transformer->config.vocab_size, temperature, top_p, seed);
 
         if (chat_mode) chat(transformer.get(), &tokenizer, &sampler, prompt, "", n_predict);
         else generate(transformer.get(), &tokenizer, &sampler, prompt, n_predict);

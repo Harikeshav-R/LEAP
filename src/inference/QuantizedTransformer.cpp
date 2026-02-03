@@ -948,23 +948,28 @@ namespace Inference {
         if (dist_config.mode == DistributedMode::Master) {
             if (!dist_config.transport) throw std::runtime_error("Transport not set for master");
 
-            std::vector<char> buffer(sizeof(PacketHeader) + dim * sizeof(float));
+            // Resize reusable buffer if needed
+            size_t packet_size = sizeof(PacketHeader) + dim * sizeof(float);
+            if (transfer_buffer.size() < packet_size) transfer_buffer.resize(packet_size);
+
             PacketHeader header{pos, flags};
             
-            std::memcpy(buffer.data(), &header, sizeof(PacketHeader));
-            std::memcpy(buffer.data() + sizeof(PacketHeader), x, dim * sizeof(float));
+            std::memcpy(transfer_buffer.data(), &header, sizeof(PacketHeader));
+            std::memcpy(transfer_buffer.data() + sizeof(PacketHeader), x, dim * sizeof(float));
 
             // Master sends to Next (Worker 1)
-            dist_config.transport->send_next(buffer.data(), buffer.size());
+            dist_config.transport->send_next(transfer_buffer.data(), packet_size);
 
-            // Ring Synchronization: Always receive to clear buffer/maintain order
-            // IMPORTANT: Receive into 'buffer', not 'x', to avoid header corruption.
-            dist_config.transport->recv_prev(buffer.data(), buffer.size());
-            
-            // Extract the data (skip header)
-            std::memcpy(x, buffer.data() + sizeof(PacketHeader), dim * sizeof(float));
+            if (flags == FLAG_NEED_REPLY) {
+                // Ring Synchronization (Stop-and-Wait):
+                // Only wait for reply if we actually asked for one.
+                // For NO_REPLY (Prompt Phase), we Pipeline (Fire-and-Forget).
 
-            if (flags != FLAG_NEED_REPLY) {
+                dist_config.transport->recv_prev(transfer_buffer.data(), packet_size);
+                
+                // Extract the data (skip header)
+                std::memcpy(x, transfer_buffer.data() + sizeof(PacketHeader), dim * sizeof(float));
+            } else {
                 return nullptr;
             }
         }
@@ -984,28 +989,31 @@ namespace Inference {
         PacketHeader header{};
 
         const int start_layer = dist_config.split_layer;
-        std::vector<char> buffer(sizeof(PacketHeader) + dim * sizeof(float));
+        // end_layer logic consistent with FloatTransformer update
+        // Use dist_config.end_layer if set (via main.cpp defaults to n_layers)
+
+        size_t packet_size = sizeof(PacketHeader) + dim * sizeof(float);
+        if (transfer_buffer.size() < packet_size) transfer_buffer.resize(packet_size);
 
         std::cout << "Worker started. Processing layers " << start_layer << " to " << dist_config.end_layer - 1 << std::endl;
 
         while (true) {
             try {
                 // Receive header + data from Prev
-                dist_config.transport->recv_prev(buffer.data(), buffer.size());
+                dist_config.transport->recv_prev(transfer_buffer.data(), packet_size);
 
-                std::memcpy(&header, buffer.data(), sizeof(PacketHeader));
-                std::memcpy(x, buffer.data() + sizeof(PacketHeader), dim * sizeof(float));
+                std::memcpy(&header, transfer_buffer.data(), sizeof(PacketHeader));
+                std::memcpy(x, transfer_buffer.data() + sizeof(PacketHeader), dim * sizeof(float));
 
                 // Process layers
                 for (int l = start_layer; l < dist_config.end_layer; l++) {
                     run_layer(l, header.pos, x);
                 }
 
-                // In Ring Topology, everyone just forwards to Next
-                // If this is the Tail Worker, next_host is the Master.
-                std::memcpy(buffer.data() + sizeof(PacketHeader), x, dim * sizeof(float));
-                dist_config.transport->send_next(buffer.data(), buffer.size());
-
+                if (!dist_config.is_tail || header.flags == FLAG_NEED_REPLY) {
+                    std::memcpy(transfer_buffer.data() + sizeof(PacketHeader), x, dim * sizeof(float));
+                    dist_config.transport->send_next(transfer_buffer.data(), packet_size);
+                }
             } catch (const std::exception &e) {
                 std::cerr << "Worker loop error: " << e.what() << std::endl;
                 break;

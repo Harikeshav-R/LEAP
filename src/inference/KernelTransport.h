@@ -24,6 +24,8 @@ namespace Inference {
         void send_prev(const void *data, size_t size) override; // Not used
         void recv_prev(void *data, size_t size) override;
 
+        void send_multipart_next(const void* header, size_t header_size, const void* data, size_t data_size) override;
+
     private:
         void set_destination(const std::string& ip, int target_port);
         void recv_internal(void *data, size_t size, bool update_prev);

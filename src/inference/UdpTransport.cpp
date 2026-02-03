@@ -63,6 +63,8 @@ namespace Inference {
     }
 
     void UdpTransport::send_next(const void *data, size_t size) {
+        // Forward to multipart with empty header (or treat data as full payload)
+        // Just reuse the logic to avoid code duplication, but for now keep distinct for simplicity
         if (next_addr.sin_family == 0) throw std::runtime_error("Next address not configured");
         
         const auto *bytes = static_cast<const uint8_t *>(data);
@@ -72,25 +74,18 @@ namespace Inference {
 
         seq_id++;
 
-        // Reuse packet_buffer for HEADER only (saves large allocs, keeps alignment)
-        if (packet_buffer.size() < sizeof(leap_header)) {
-             packet_buffer.resize(sizeof(leap_header));
-        }
+        if (packet_buffer.size() < sizeof(leap_header)) packet_buffer.resize(sizeof(leap_header));
         auto *hdr = reinterpret_cast<leap_header *>(packet_buffer.data());
 
         while (processed < size) {
             size_t chunk_len = LEAP_CHUNK_SIZE;
             if (processed + chunk_len > size) chunk_len = size - processed;
 
-            // Prepare Header
             hdr->magic = htonl(LEAP_MAGIC);
             hdr->seq_id = htons(seq_id);
             hdr->chunk_id = htons(chunk_idx);
             hdr->total_chunks = htons(total_chunks);
 
-            // Optimization: Scatter/Gather I/O (Zero-Copy)
-            // vector 0: Header
-            // vector 1: Payload (Direct pointer to data)
             struct iovec iov[2];
             iov[0].iov_base = packet_buffer.data();
             iov[0].iov_len = sizeof(leap_header);
@@ -103,9 +98,69 @@ namespace Inference {
             msg.msg_iov = iov;
             msg.msg_iovlen = 2;
 
-            if (sendmsg(sockfd, &msg, 0) < 0) {
-                throw std::runtime_error("UDP send next failed");
+            if (sendmsg(sockfd, &msg, 0) < 0) throw std::runtime_error("UDP send next failed");
+
+            processed += chunk_len;
+            chunk_idx++;
+        }
+    }
+
+    void UdpTransport::send_multipart_next(const void* header, size_t header_size, const void* data, size_t data_size) {
+        if (next_addr.sin_family == 0) throw std::runtime_error("Next address not configured");
+        
+        const uint8_t* hdr_bytes = (const uint8_t*)header;
+        const uint8_t* dat_bytes = (const uint8_t*)data;
+        size_t total_size = header_size + data_size;
+        
+        size_t processed = 0;
+        uint16_t total_chunks = (total_size + LEAP_CHUNK_SIZE - 1) / LEAP_CHUNK_SIZE;
+        uint16_t chunk_idx = 0;
+
+        seq_id++;
+
+        if (packet_buffer.size() < sizeof(leap_header)) packet_buffer.resize(sizeof(leap_header));
+        auto *leap_hdr = reinterpret_cast<leap_header *>(packet_buffer.data());
+
+        while (processed < total_size) {
+            size_t chunk_len = LEAP_CHUNK_SIZE;
+            if (processed + chunk_len > total_size) chunk_len = total_size - processed;
+
+            leap_hdr->magic = htonl(LEAP_MAGIC);
+            leap_hdr->seq_id = htons(seq_id);
+            leap_hdr->chunk_id = htons(chunk_idx);
+            leap_hdr->total_chunks = htons(total_chunks);
+
+            struct iovec iov[3]; // [LeapHdr, AppHdr?, Data?]
+            int iov_cnt = 1;
+            iov[0].iov_base = packet_buffer.data();
+            iov[0].iov_len = sizeof(leap_header);
+
+            size_t space_in_chunk = chunk_len;
+
+            // Part 1: Header (App Layer)
+            if (processed < header_size) {
+                size_t take = std::min(space_in_chunk, header_size - processed);
+                iov[iov_cnt].iov_base = const_cast<uint8_t*>(hdr_bytes + processed);
+                iov[iov_cnt].iov_len = take;
+                iov_cnt++;
+                space_in_chunk -= take;
             }
+
+            // Part 2: Data
+            if (space_in_chunk > 0) {
+                size_t data_processed = (processed >= header_size) ? (processed - header_size) : 0;
+                iov[iov_cnt].iov_base = const_cast<uint8_t*>(dat_bytes + data_processed);
+                iov[iov_cnt].iov_len = space_in_chunk;
+                iov_cnt++;
+            }
+
+            struct msghdr msg{};
+            msg.msg_name = &next_addr;
+            msg.msg_namelen = sizeof(next_addr);
+            msg.msg_iov = iov;
+            msg.msg_iovlen = iov_cnt;
+
+            if (sendmsg(sockfd, &msg, 0) < 0) throw std::runtime_error("UDP send multipart failed");
 
             processed += chunk_len;
             chunk_idx++;
@@ -126,11 +181,13 @@ namespace Inference {
         size_t chunks_count = 0;
         auto *out_bytes = static_cast<uint8_t *>(data);
         int32_t active_seq_id = -1;
-        // reuse member buffer packet_buffer
-
+        
         while (chunks_count < expected_chunks) {
             sockaddr_in src_addr;
             socklen_t addr_len = sizeof(src_addr);
+
+            // Reuse packet_buffer for receive
+            if (packet_buffer.size() < 2048) packet_buffer.resize(2048);
 
             ssize_t len = recvfrom(sockfd, packet_buffer.data(), packet_buffer.size(), 0,
                                    (struct sockaddr *) &src_addr, &addr_len);

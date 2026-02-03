@@ -23,6 +23,8 @@ namespace Inference {
         void recv_next(void *data, size_t size) override;
         void send_prev(const void *data, size_t size) override;
         void recv_prev(void *data, size_t size) override;
+        
+        void send_multipart_next(const void* header, size_t header_size, const void* data, size_t data_size) override;
 
     private:
         std::string ip;

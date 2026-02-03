@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <iostream>
 #include <cstring>
+#include <sys/uio.h> // For writev
 
 namespace Inference {
     TcpTransport::TcpTransport(std::string ip, const int port, std::string next_ip, int next_port)
@@ -119,6 +120,42 @@ namespace Inference {
             ssize_t sent = ::send(egress_fd, bytes + total_sent, size - total_sent, 0);
             if (sent < 0) throw std::runtime_error("Send next failed");
             total_sent += sent;
+        }
+    }
+
+    void TcpTransport::send_multipart_next(const void* header, size_t header_size, const void* data, size_t data_size) {
+        if (egress_fd == -1) throw std::runtime_error("No next node connected");
+        
+        struct iovec iov[2];
+        iov[0].iov_base = const_cast<void*>(header);
+        iov[0].iov_len = header_size;
+        iov[1].iov_base = const_cast<void*>(data);
+        iov[1].iov_len = data_size;
+
+        // writev sends atomic list
+        ssize_t sent = writev(egress_fd, iov, 2);
+        
+        if (sent < 0) throw std::runtime_error("Writev failed");
+        
+        // Handle partial sends (rare with large buffers but possible)
+        size_t total_expected = header_size + data_size;
+        if (static_cast<size_t>(sent) < total_expected) {
+            // Fallback to sending the rest sequentially if partial write happened
+            // This is complex logic, simplified here by assuming buffers > packet
+            size_t remaining = total_expected - sent;
+            
+            // Revert to manual send for tail
+            // Calculate where we left off
+            size_t sent_so_far = sent;
+            if (sent_so_far < header_size) {
+                // Sent part of header
+                send_next((char*)header + sent_so_far, header_size - sent_so_far);
+                send_next(data, data_size);
+            } else {
+                // Sent all header + part of data
+                size_t data_sent = sent_so_far - header_size;
+                send_next((char*)data + data_sent, data_size - data_sent);
+            }
         }
     }
 

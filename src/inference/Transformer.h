@@ -18,9 +18,6 @@ namespace Inference {
         int split_layer = 0;
         int end_layer = 0; // The layer this node stops at (exclusive)
         Transport *transport = nullptr;
-        std::string next_ip;
-        int next_port = 0;
-        bool is_tail = false;
     };
 
     struct PacketHeader {

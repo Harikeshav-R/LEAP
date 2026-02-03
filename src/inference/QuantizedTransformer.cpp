@@ -935,7 +935,7 @@ namespace Inference {
 
         std::copy_n(w->token_embedding_table.data() + token * dim, dim, x);
 
-        int start_layer = 0;
+        constexpr int start_layer = 0;
         int end_layer = p->n_layers;
 
         if (dist_config.mode == DistributedMode::Master) {
@@ -949,18 +949,18 @@ namespace Inference {
         if (dist_config.mode == DistributedMode::Master) {
             if (!dist_config.transport) throw std::runtime_error("Transport not set for master");
 
-            PacketHeader header{pos, flags};
+            const PacketHeader header{pos, flags};
 
             // Optimization: Zero-Copy Send
             dist_config.transport->send_multipart_next(&header, sizeof(PacketHeader), x, dim * sizeof(float));
 
             if (flags == FLAG_NEED_REPLY) {
                 // Ring Synchronization (Stop-and-Wait):
-                size_t packet_size = sizeof(PacketHeader) + dim * sizeof(float);
+                const size_t packet_size = sizeof(PacketHeader) + dim * sizeof(float);
                 if (transfer_buffer.size() < packet_size) transfer_buffer.resize(packet_size);
 
                 dist_config.transport->recv_prev(transfer_buffer.data(), packet_size);
-                
+
                 // Extract the data (skip header)
                 std::memcpy(x, transfer_buffer.data() + sizeof(PacketHeader), dim * sizeof(float));
             } else {
@@ -986,10 +986,11 @@ namespace Inference {
         // end_layer logic consistent with FloatTransformer update
         // Use dist_config.end_layer if set (via main.cpp defaults to n_layers)
 
-        size_t packet_size = sizeof(PacketHeader) + dim * sizeof(float);
+        const size_t packet_size = sizeof(PacketHeader) + dim * sizeof(float);
         if (transfer_buffer.size() < packet_size) transfer_buffer.resize(packet_size);
 
-        std::cout << "Worker started. Processing layers " << start_layer << " to " << dist_config.end_layer - 1 << std::endl;
+        std::cout << "Worker started. Processing layers " << start_layer << " to " << dist_config.end_layer - 1 <<
+                std::endl;
 
         while (true) {
             try {

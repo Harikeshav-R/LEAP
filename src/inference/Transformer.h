@@ -26,8 +26,9 @@ namespace Inference {
         int pos;
         int flags; // 0: No Reply (Fire-and-Forget), 1: Need Reply
     };
-    const int FLAG_NO_REPLY = 0;
-    const int FLAG_NEED_REPLY = 1;
+
+    constexpr int FLAG_NO_REPLY = 0;
+    constexpr int FLAG_NEED_REPLY = 1;
 
     class Transformer {
     public:
@@ -42,7 +43,7 @@ namespace Inference {
         // Worker loop: receive tensor, process layers, send back
         virtual void worker_loop() = 0;
 
-        void set_distributed_config(DistributedConfig config) {
+        void set_distributed_config(const DistributedConfig &config) {
             dist_config = config;
         }
 

@@ -17,14 +17,17 @@ namespace Inference {
         void initialize() override;
 
         void send(const void *data, size_t size) override; // Default: send_next
-        void recv(void *data, size_t size) override;       // Default: recv_prev
+        void recv(void *data, size_t size) override; // Default: recv_prev
 
         void send_next(const void *data, size_t size) override;
+
         void recv_next(void *data, size_t size) override;
+
         void send_prev(const void *data, size_t size) override;
+
         void recv_prev(void *data, size_t size) override;
-        
-        void send_multipart_next(const void* header, size_t header_size, const void* data, size_t data_size) override;
+
+        void send_multipart_next(const void *header, size_t header_size, const void *data, size_t data_size) override;
 
     private:
         std::string ip;
@@ -32,11 +35,11 @@ namespace Inference {
         std::string next_ip;
         int next_port;
 
-        int sockfd = -1;    // Listening socket
+        int sockfd = -1; // Listening socket
         int ingress_fd = -1; // Incoming connection from Previous
-        int egress_fd = -1;  // Outgoing connection to Next
+        int egress_fd = -1; // Outgoing connection to Next
 
-        void setup_socket_low_latency(int fd);
+        static void setup_socket_low_latency(int fd);
     };
 } // namespace Inference
 

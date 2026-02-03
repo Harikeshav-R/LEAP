@@ -38,7 +38,7 @@ namespace Inference {
 
     class FloatTransformer : public Transformer {
     public:
-        FloatTransformer(const Config &config, int fd, void *mmap_ptr, size_t file_size, float *weights_ptr,
+        FloatTransformer(const Config &config, int fd, void *mmap_ptr, size_t file_size, const float *weights_ptr,
                          int shared_weights);
 
         ~FloatTransformer() override;

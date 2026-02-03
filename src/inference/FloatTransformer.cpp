@@ -18,7 +18,7 @@
 
 namespace Inference {
     FloatTransformer::FloatTransformer(const Config &config, const int fd, void *mmap_ptr, const size_t file_size,
-                                       float *weights_ptr,
+                                       const float *weights_ptr,
                                        const int shared_weights)
         : fd(fd), mmap_ptr(mmap_ptr), file_size(file_size) {
         this->config = config;
@@ -672,7 +672,7 @@ namespace Inference {
         const float *content_row = w->token_embedding_table + token * dim;
         std::copy_n(content_row, dim, x);
 
-        int start_layer = 0;
+        constexpr int start_layer = 0;
         int end_layer = p->n_layers;
 
         if (dist_config.mode == DistributedMode::Master) {
@@ -686,18 +686,18 @@ namespace Inference {
         if (dist_config.mode == DistributedMode::Master) {
             if (!dist_config.transport) throw std::runtime_error("Transport not set for master");
 
-            PacketHeader header{pos, flags};
+            const PacketHeader header{pos, flags};
 
             // Optimization: Zero-Copy Send
             dist_config.transport->send_multipart_next(&header, sizeof(PacketHeader), x, dim * sizeof(float));
 
             if (flags == FLAG_NEED_REPLY) {
                 // Ring Synchronization (Stop-and-Wait):
-                size_t packet_size = sizeof(PacketHeader) + dim * sizeof(float);
+                const size_t packet_size = sizeof(PacketHeader) + dim * sizeof(float);
                 if (transfer_buffer.size() < packet_size) transfer_buffer.resize(packet_size);
-                
+
                 dist_config.transport->recv_prev(transfer_buffer.data(), packet_size);
-                
+
                 // Extract the data (skip header)
                 std::memcpy(x, transfer_buffer.data() + sizeof(PacketHeader), dim * sizeof(float));
             } else {
@@ -718,11 +718,12 @@ namespace Inference {
         PacketHeader header{};
 
         const int start_layer = dist_config.split_layer;
-        
-        size_t packet_size = sizeof(PacketHeader) + dim * sizeof(float);
+
+        const size_t packet_size = sizeof(PacketHeader) + dim * sizeof(float);
         if (transfer_buffer.size() < packet_size) transfer_buffer.resize(packet_size);
 
-        std::cout << "Worker started. Processing layers " << start_layer << " to " << dist_config.end_layer - 1 << std::endl;
+        std::cout << "Worker started. Processing layers " << start_layer << " to " << dist_config.end_layer - 1 <<
+                std::endl;
 
         while (true) {
             try {
@@ -740,11 +741,10 @@ namespace Inference {
                 // If Tail and NO_REPLY, Drop the packet (End of Pipeline)
                 // If Not Tail, Forward to Next
                 // If Tail and NEED_REPLY, Forward to Next (Master)
-                
+
                 if (!dist_config.is_tail || header.flags == FLAG_NEED_REPLY) {
                     dist_config.transport->send_multipart_next(&header, sizeof(PacketHeader), x, dim * sizeof(float));
                 }
-
             } catch (const std::exception &e) {
                 std::cerr << "Worker loop error: " << e.what() << std::endl;
                 break;

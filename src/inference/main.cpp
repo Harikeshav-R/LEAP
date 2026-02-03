@@ -34,7 +34,7 @@ void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, 
     int pos = 0;
 
     while (pos < steps) {
-        int flags = (pos < num_prompt_tokens - 1) ? FLAG_NO_REPLY : FLAG_NEED_REPLY;
+        const int flags = (pos < num_prompt_tokens - 1) ? FLAG_NO_REPLY : FLAG_NEED_REPLY;
         float *logits = transformer->forward(token, pos, flags);
 
         if (pos < num_prompt_tokens - 1) {
@@ -128,31 +128,31 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, cons
             std::cout << "Assistant: ";
         }
 
-        if (user_idx < (int)prompt_tokens.size()) {
+        if (user_idx < static_cast<int>(prompt_tokens.size())) {
             token = prompt_tokens[user_idx++];
         } else {
             token = next;
         }
 
-        if (user_idx >= (int)prompt_tokens.size() && (token == 128009 || token == 128001)) {
+        if (user_idx >= static_cast<int>(prompt_tokens.size()) && (token == 128009 || token == 128001)) {
             user_turn = true;
         }
 
-        int flags = (user_idx < (int)prompt_tokens.size()) ? FLAG_NO_REPLY : FLAG_NEED_REPLY;
+        const int flags = (user_idx < static_cast<int>(prompt_tokens.size())) ? FLAG_NO_REPLY : FLAG_NEED_REPLY;
         float *logits = transformer->forward(token, pos, flags);
-        
+
         if (flags == FLAG_NO_REPLY) {
-            next = (user_idx < (int)prompt_tokens.size()) ? prompt_tokens[user_idx] : 0;
+            next = (user_idx < static_cast<int>(prompt_tokens.size())) ? prompt_tokens[user_idx] : 0;
         } else {
             next = sampler->sample(logits);
         }
-        
+
         pos++;
 
-        if (user_idx >= (int)prompt_tokens.size() && (next == 128009 || next == 128001)) {
+        if (user_idx >= static_cast<int>(prompt_tokens.size()) && (next == 128009 || next == 128001)) {
             std::cout << std::endl;
         }
-        if (user_idx >= (int)prompt_tokens.size() && next != 128009 && next != 128001 && next != 128006) {
+        if (user_idx >= static_cast<int>(prompt_tokens.size()) && next != 128009 && next != 128001 && next != 128006) {
             const std::string &piece = tokenizer->decode(token, next);
             Utils::safe_print(piece);
             std::cout.flush();
@@ -163,23 +163,23 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, cons
 
 int main(int argc, char *argv[]) {
     CLI::App app{"LEAP - Optimized Distributed LLM Inference (Ring Topology)"};
-    
+
     std::string model_path;
     std::string tokenizer_path = "tokenizer.bin";
     app.add_option("model", model_path, "Path to model (.bin)")->required()->check(CLI::ExistingFile);
     app.add_option("-t,--tokenizer", tokenizer_path, "Path to tokenizer (.bin)")
-        ->check(CLI::ExistingFile)
-        ->capture_default_str();
+            ->check(CLI::ExistingFile)
+            ->capture_default_str();
 
     std::string role = "single";
     app.add_option("--role", role, "Node role: single, master, worker")
-        ->check(CLI::IsMember({"single", "master", "worker"}))
-        ->capture_default_str();
-    
+            ->check(CLI::IsMember({"single", "master", "worker"}))
+            ->capture_default_str();
+
     std::string transport_type = "tcp";
     app.add_option("--transport", transport_type, "Transport: tcp, udp, kernel")
-        ->check(CLI::IsMember({"tcp", "udp", "kernel"}))
-        ->capture_default_str();
+            ->check(CLI::IsMember({"tcp", "udp", "kernel"}))
+            ->capture_default_str();
 
     int port = 9999;
     app.add_option("--port", port, "Local port to bind")->capture_default_str();
@@ -227,7 +227,7 @@ int main(int argc, char *argv[]) {
         auto transformer = Transformer::create(model_path);
         if (end == 0) end = transformer->config.n_layers;
 
-        DistributedMode dist_role = DistributedMode::Single;
+        auto dist_role = DistributedMode::Single;
         if (role == "master") dist_role = DistributedMode::Master;
         else if (role == "worker") dist_role = DistributedMode::Worker;
 
@@ -266,7 +266,7 @@ int main(int argc, char *argv[]) {
         dist_config.transport = transport.get();
         // If this node processes the final layers, it is the tail of the pipeline
         dist_config.is_tail = (end == transformer->config.n_layers);
-        
+
         transformer->set_distributed_config(dist_config);
 
         if (dist_role == DistributedMode::Worker) {
@@ -284,7 +284,6 @@ int main(int argc, char *argv[]) {
 
         if (chat_mode) chat(transformer.get(), &tokenizer, &sampler, prompt, system_prompt, n_predict);
         else generate(transformer.get(), &tokenizer, &sampler, prompt, n_predict);
-
     } catch (const std::exception &e) {
         std::cerr << "[Error] " << e.what() << std::endl;
         return 1;

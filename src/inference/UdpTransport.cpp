@@ -31,11 +31,11 @@ namespace Inference {
         bind_addr.sin_addr.s_addr = INADDR_ANY;
 
         // Optimization: Increase Socket Buffers to 8MB to absorb bursts
-        int buf_size = 8 * 1024 * 1024;
+        constexpr int buf_size = 8 * 1024 * 1024;
         setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &buf_size, sizeof(buf_size));
         setsockopt(sockfd, SOL_SOCKET, SO_SNDBUF, &buf_size, sizeof(buf_size));
 
-        if (bind(sockfd, (struct sockaddr *) &bind_addr, sizeof(bind_addr)) < 0) {
+        if (bind(sockfd, reinterpret_cast<struct sockaddr *>(&bind_addr), sizeof(bind_addr)) < 0) {
             throw std::runtime_error("Bind failed on port " + std::to_string(port));
         }
 
@@ -61,11 +61,11 @@ namespace Inference {
         recv_prev(data, size);
     }
 
-    void UdpTransport::send_next(const void *data, size_t size) {
+    void UdpTransport::send_next(const void *data, const size_t size) {
         // Forward to multipart with empty header (or treat data as full payload)
         // Just reuse the logic to avoid code duplication, but for now keep distinct for simplicity
         if (next_addr.sin_family == 0) throw std::runtime_error("Next address not configured");
-        
+
         const auto *bytes = static_cast<const uint8_t *>(data);
         size_t processed = 0;
         uint16_t total_chunks = (size + LEAP_CHUNK_SIZE - 1) / LEAP_CHUNK_SIZE;
@@ -88,7 +88,7 @@ namespace Inference {
             struct iovec iov[2];
             iov[0].iov_base = packet_buffer.data();
             iov[0].iov_len = sizeof(leap_header);
-            iov[1].iov_base = const_cast<uint8_t*>(bytes + processed);
+            iov[1].iov_base = const_cast<uint8_t *>(bytes + processed);
             iov[1].iov_len = chunk_len;
 
             struct msghdr msg{};
@@ -104,13 +104,14 @@ namespace Inference {
         }
     }
 
-    void UdpTransport::send_multipart_next(const void* header, size_t header_size, const void* data, size_t data_size) {
+    void UdpTransport::send_multipart_next(const void *header, const size_t header_size, const void *data,
+                                           const size_t data_size) {
         if (next_addr.sin_family == 0) throw std::runtime_error("Next address not configured");
-        
-        const uint8_t* hdr_bytes = (const uint8_t*)header;
-        const uint8_t* dat_bytes = (const uint8_t*)data;
-        size_t total_size = header_size + data_size;
-        
+
+        const auto *hdr_bytes = static_cast<const uint8_t *>(header);
+        const auto *dat_bytes = static_cast<const uint8_t *>(data);
+        const size_t total_size = header_size + data_size;
+
         size_t processed = 0;
         uint16_t total_chunks = (total_size + LEAP_CHUNK_SIZE - 1) / LEAP_CHUNK_SIZE;
         uint16_t chunk_idx = 0;
@@ -138,8 +139,8 @@ namespace Inference {
 
             // Part 1: Header (App Layer)
             if (processed < header_size) {
-                size_t take = std::min(space_in_chunk, header_size - processed);
-                iov[iov_cnt].iov_base = const_cast<uint8_t*>(hdr_bytes + processed);
+                const size_t take = std::min(space_in_chunk, header_size - processed);
+                iov[iov_cnt].iov_base = const_cast<uint8_t *>(hdr_bytes + processed);
                 iov[iov_cnt].iov_len = take;
                 iov_cnt++;
                 space_in_chunk -= take;
@@ -147,8 +148,8 @@ namespace Inference {
 
             // Part 2: Data
             if (space_in_chunk > 0) {
-                size_t data_processed = (processed >= header_size) ? (processed - header_size) : 0;
-                iov[iov_cnt].iov_base = const_cast<uint8_t*>(dat_bytes + data_processed);
+                const size_t data_processed = (processed >= header_size) ? (processed - header_size) : 0;
+                iov[iov_cnt].iov_base = const_cast<uint8_t *>(dat_bytes + data_processed);
                 iov[iov_cnt].iov_len = space_in_chunk;
                 iov_cnt++;
             }
@@ -167,32 +168,32 @@ namespace Inference {
     }
 
     void UdpTransport::recv_next(void *data, size_t size) {
-         throw std::runtime_error("recv_next not supported in Ring");
+        throw std::runtime_error("recv_next not supported in Ring");
     }
 
     void UdpTransport::send_prev(const void *data, size_t size) {
         throw std::runtime_error("send_prev not supported in Ring");
     }
 
-    void UdpTransport::recv_prev(void *data, size_t size) {
-        size_t expected_chunks = (size + LEAP_CHUNK_SIZE - 1) / LEAP_CHUNK_SIZE;
+    void UdpTransport::recv_prev(void *data, const size_t size) {
+        const size_t expected_chunks = (size + LEAP_CHUNK_SIZE - 1) / LEAP_CHUNK_SIZE;
         std::vector<bool> received_chunks(expected_chunks, false);
         size_t chunks_count = 0;
         auto *out_bytes = static_cast<uint8_t *>(data);
         int32_t active_seq_id = -1;
-        
+
         while (chunks_count < expected_chunks) {
-            sockaddr_in src_addr;
+            sockaddr_in src_addr{};
             socklen_t addr_len = sizeof(src_addr);
 
             // Reuse packet_buffer for receive
             if (packet_buffer.size() < 2048) packet_buffer.resize(2048);
 
-            ssize_t len = recvfrom(sockfd, packet_buffer.data(), packet_buffer.size(), 0,
-                                   (struct sockaddr *) &src_addr, &addr_len);
+            const ssize_t len = recvfrom(sockfd, packet_buffer.data(), packet_buffer.size(), 0,
+                                         reinterpret_cast<struct sockaddr *>(&src_addr), &addr_len);
 
             if (len < 0) throw std::runtime_error("UDP recv prev failed");
-            
+
             // Learn Prev Addr (optional, just logging or verification)
             if (!prev_addr_set) {
                 prev_addr = src_addr;
@@ -204,8 +205,8 @@ namespace Inference {
             auto *hdr = reinterpret_cast<leap_header *>(packet_buffer.data());
             if (ntohl(hdr->magic) != LEAP_MAGIC) continue;
 
-            uint16_t seq = ntohs(hdr->seq_id);
-            uint16_t chunk = ntohs(hdr->chunk_id);
+            const uint16_t seq = ntohs(hdr->seq_id);
+            const uint16_t chunk = ntohs(hdr->chunk_id);
 
             if (active_seq_id == -1) {
                 active_seq_id = seq;

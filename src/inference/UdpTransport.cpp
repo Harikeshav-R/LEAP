@@ -30,6 +30,12 @@ namespace Inference {
         bind_addr.sin_family = AF_INET;
         bind_addr.sin_port = htons(port);
         bind_addr.sin_addr.s_addr = INADDR_ANY;
+
+        // Optimization: Increase Socket Buffers to 8MB to absorb bursts
+        int buf_size = 8 * 1024 * 1024;
+        setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &buf_size, sizeof(buf_size));
+        setsockopt(sockfd, SOL_SOCKET, SO_SNDBUF, &buf_size, sizeof(buf_size));
+
         if (bind(sockfd, (struct sockaddr *) &bind_addr, sizeof(bind_addr)) < 0) {
             throw std::runtime_error("Bind failed on port " + std::to_string(port));
         }
@@ -66,27 +72,38 @@ namespace Inference {
 
         seq_id++;
 
+        // Reuse packet_buffer for HEADER only (saves large allocs, keeps alignment)
+        if (packet_buffer.size() < sizeof(leap_header)) {
+             packet_buffer.resize(sizeof(leap_header));
+        }
+        auto *hdr = reinterpret_cast<leap_header *>(packet_buffer.data());
+
         while (processed < size) {
             size_t chunk_len = LEAP_CHUNK_SIZE;
             if (processed + chunk_len > size) chunk_len = size - processed;
 
-            // Reuse packet_buffer
-            // Ensure size
-            if (packet_buffer.size() < sizeof(leap_header) + chunk_len) {
-                 packet_buffer.resize(sizeof(leap_header) + chunk_len);
-            }
-
-            auto *hdr = reinterpret_cast<leap_header *>(packet_buffer.data());
-
+            // Prepare Header
             hdr->magic = htonl(LEAP_MAGIC);
             hdr->seq_id = htons(seq_id);
             hdr->chunk_id = htons(chunk_idx);
             hdr->total_chunks = htons(total_chunks);
 
-            std::memcpy(packet_buffer.data() + sizeof(leap_header), bytes + processed, chunk_len);
+            // Optimization: Scatter/Gather I/O (Zero-Copy)
+            // vector 0: Header
+            // vector 1: Payload (Direct pointer to data)
+            struct iovec iov[2];
+            iov[0].iov_base = packet_buffer.data();
+            iov[0].iov_len = sizeof(leap_header);
+            iov[1].iov_base = const_cast<uint8_t*>(bytes + processed);
+            iov[1].iov_len = chunk_len;
 
-            if (sendto(sockfd, packet_buffer.data(), sizeof(leap_header) + chunk_len, 0,
-                       (struct sockaddr *) &next_addr, sizeof(next_addr)) < 0) {
+            struct msghdr msg{};
+            msg.msg_name = &next_addr;
+            msg.msg_namelen = sizeof(next_addr);
+            msg.msg_iov = iov;
+            msg.msg_iovlen = 2;
+
+            if (sendmsg(sockfd, &msg, 0) < 0) {
                 throw std::runtime_error("UDP send next failed");
             }
 

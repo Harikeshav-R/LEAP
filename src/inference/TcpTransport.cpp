@@ -33,6 +33,11 @@ namespace Inference {
             throw std::runtime_error("Failed to create socket");
         }
 
+        // Optimization: Increase Socket Buffers to 8MB
+        int buf_size = 8 * 1024 * 1024;
+        setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &buf_size, sizeof(buf_size));
+        setsockopt(sockfd, SOL_SOCKET, SO_SNDBUF, &buf_size, sizeof(buf_size));
+
         sockaddr_in serv_addr{};
         serv_addr.sin_family = AF_INET;
         serv_addr.sin_port = htons(port);

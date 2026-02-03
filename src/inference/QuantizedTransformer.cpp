@@ -663,6 +663,7 @@ namespace Inference {
 
         // RoPE
         const int rope_offset = pos * (head_size / 2);
+#pragma omp parallel for
         for (int i = 0; i < p->n_heads; i++) {
             int j = 0;
 #if defined(__ARM_NEON)

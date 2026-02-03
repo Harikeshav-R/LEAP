@@ -172,13 +172,20 @@ int main(int argc, char *argv[]) {
         ->capture_default_str();
 
     std::string role = "single";
-    app.add_option("--role", role, "Node role: single, master, worker")->capture_default_str();
+    app.add_option("--role", role, "Node role: single, master, worker")
+        ->check(CLI::IsMember({"single", "master", "worker"}))
+        ->capture_default_str();
     
     std::string transport_type = "tcp";
-    app.add_option("--transport", transport_type, "Transport: tcp, udp, kernel")->capture_default_str();
+    app.add_option("--transport", transport_type, "Transport: tcp, udp, kernel")
+        ->check(CLI::IsMember({"tcp", "udp", "kernel"}))
+        ->capture_default_str();
 
     int port = 9999;
     app.add_option("--port", port, "Local port to bind")->capture_default_str();
+
+    std::string host = "0.0.0.0";
+    app.add_option("--host", host, "Local host to bind")->capture_default_str();
 
     std::string next_host;
     app.add_option("--next-host", next_host, "Next node IP");
@@ -194,6 +201,9 @@ int main(int argc, char *argv[]) {
 
     std::string prompt;
     app.add_option("-p,--prompt", prompt, "Input prompt");
+
+    std::string system_prompt;
+    app.add_option("-s,--system", system_prompt, "System prompt");
 
     bool chat_mode = false;
     app.add_flag("-c,--chat", chat_mode, "Chat mode");
@@ -221,14 +231,24 @@ int main(int argc, char *argv[]) {
         if (role == "master") dist_role = DistributedMode::Master;
         else if (role == "worker") dist_role = DistributedMode::Worker;
 
+        if (dist_role == DistributedMode::Master) {
+            if (split <= 0 || split >= transformer->config.n_layers) {
+                throw std::runtime_error("Master split layer must be in (0, n_layers)");
+            }
+        } else if (dist_role == DistributedMode::Worker) {
+            if (split >= end || end > transformer->config.n_layers) {
+                throw std::runtime_error("Worker config error: 0 <= split < end <= n_layers");
+            }
+        }
+
         std::unique_ptr<Transport> transport = nullptr;
         if (dist_role != DistributedMode::Single) {
             if (next_host.empty()) throw std::runtime_error("--next-host is required for distributed mode");
 
             if (transport_type == "tcp") {
-                transport = std::make_unique<TcpTransport>("0.0.0.0", port, next_host, next_port);
+                transport = std::make_unique<TcpTransport>(host, port, next_host, next_port);
             } else if (transport_type == "udp") {
-                transport = std::make_unique<UdpTransport>("0.0.0.0", port, next_host, next_port);
+                transport = std::make_unique<UdpTransport>(host, port, next_host, next_port);
             } else if (transport_type == "kernel") {
 #ifndef __linux__
                 throw std::runtime_error("Kernel transport is only supported on Linux.");
@@ -254,10 +274,15 @@ int main(int argc, char *argv[]) {
             return 0;
         }
 
+        // Clamp n_predict to model's maximum sequence length
+        if (n_predict > transformer->config.seq_len) {
+            n_predict = transformer->config.seq_len;
+        }
+
         Tokenizer tokenizer(tokenizer_path, transformer->config.vocab_size);
         Sampler sampler(transformer->config.vocab_size, temperature, top_p, seed);
 
-        if (chat_mode) chat(transformer.get(), &tokenizer, &sampler, prompt, "", n_predict);
+        if (chat_mode) chat(transformer.get(), &tokenizer, &sampler, prompt, system_prompt, n_predict);
         else generate(transformer.get(), &tokenizer, &sampler, prompt, n_predict);
 
     } catch (const std::exception &e) {

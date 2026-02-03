@@ -11,7 +11,6 @@
 namespace Inference {
     UdpTransport::UdpTransport(std::string ip, const int port, std::string next_ip, int next_port)
         : ip(std::move(ip)), port(port), next_ip(std::move(next_ip)), next_port(next_port) {
-        reassembly_buffer.resize(LEAP_BUFFER_SIZE);
         packet_buffer.resize(2048);
         memset(&prev_addr, 0, sizeof(prev_addr));
         memset(&next_addr, 0, sizeof(next_addr));

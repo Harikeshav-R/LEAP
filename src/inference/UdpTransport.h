@@ -41,8 +41,6 @@ namespace Inference {
         
         uint16_t seq_id = 0x8000; 
 
-        // Buffer for reassembly
-        std::vector<uint8_t> reassembly_buffer;
         // Optimization: Reusable packet buffer
         std::vector<uint8_t> packet_buffer;
     };

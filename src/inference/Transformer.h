@@ -5,6 +5,7 @@
 #include "Transport.h"
 #include <string>
 #include <memory>
+#include <vector>
 
 namespace Inference {
     enum class DistributedMode {
@@ -18,8 +19,6 @@ namespace Inference {
         int split_layer = 0;
         int end_layer = 0; // The layer this node stops at (exclusive)
         Transport *transport = nullptr;
-        std::string next_ip;
-        int next_port = 0;
         bool is_tail = false;
     };
 
@@ -49,6 +48,10 @@ namespace Inference {
 
         // Factory method to create the appropriate Transformer (Float or Quantized) based on file
         static std::unique_ptr<Transformer> create(const std::string &checkpoint_path);
+
+    protected:
+        // Optimization: Reusable buffer for network transfers to avoid repeated allocations
+        std::vector<char> transfer_buffer;
     };
 } // namespace Inference
 

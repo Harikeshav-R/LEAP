@@ -9,24 +9,28 @@
 namespace Inference {
     class UdpTransport : public Transport {
     public:
-        UdpTransport(std::string ip, int port, bool is_server, std::string next_ip = "", int next_port = 0);
+        // Ring Topology:
+        // - Binds to `port` (Ingress)
+        // - Sends to `next_ip:next_port` (Egress)
+        UdpTransport(std::string ip, int port, std::string next_ip, int next_port);
 
         ~UdpTransport() override;
 
         void initialize() override;
 
-        void send(const void *data, size_t size) override;
-        void recv(void *data, size_t size) override;
+        void send(const void *data, size_t size) override; // Default: send_next
+        void recv(void *data, size_t size) override;       // Default: recv_prev
 
         void send_next(const void *data, size_t size) override;
-        void recv_next(void *data, size_t size) override;
-        void send_prev(const void *data, size_t size) override;
+        void recv_next(void *data, size_t size) override; // Not used
+        void send_prev(const void *data, size_t size) override; // Not used
         void recv_prev(void *data, size_t size) override;
+
+        void send_multipart_next(const void* header, size_t header_size, const void* data, size_t data_size) override;
 
     private:
         std::string ip;
         int port;
-        bool is_server;
         std::string next_ip;
         int next_port;
 
@@ -35,15 +39,10 @@ namespace Inference {
         sockaddr_in next_addr{};
         bool prev_addr_set = false;
         
-        // Sequence ID strategy:
-        // Initialized to 0x8000 (32768) to provide a high-entropy start point that minimizes
-        // immediate collisions with other nodes (like KernelTransport) that may start at 0.
-        // In distributed pipelines with mixed transports, this offset helps the receiving
-        // kernel module distinguish new transactions. The ID wraps naturally as uint16_t.
         uint16_t seq_id = 0x8000; 
 
-        // Buffer for reassembly
-        std::vector<uint8_t> reassembly_buffer;
+        // Optimization: Reusable packet buffer
+        std::vector<uint8_t> packet_buffer;
     };
 }
 

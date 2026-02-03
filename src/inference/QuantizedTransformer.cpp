@@ -663,6 +663,7 @@ namespace Inference {
 
         // RoPE
         const int rope_offset = pos * (head_size / 2);
+#pragma omp parallel for
         for (int i = 0; i < p->n_heads; i++) {
             int j = 0;
 #if defined(__ARM_NEON)
@@ -948,26 +949,21 @@ namespace Inference {
         if (dist_config.mode == DistributedMode::Master) {
             if (!dist_config.transport) throw std::runtime_error("Transport not set for master");
 
-            // Combine Header and x into one buffer
-            // Safety check for kernel transport limits
-            if (sizeof(PacketHeader) + dim * sizeof(float) > LEAP_RX_BANK_SIZE) {
-                throw std::runtime_error("Packet size exceeds LEAP_RX_BANK_SIZE. Reduce model dimension or increase buffer size.");
-            }
-
-            std::vector<char> buffer(sizeof(PacketHeader) + dim * sizeof(float));
             PacketHeader header{pos, flags};
-            
-            std::memcpy(buffer.data(), &header, sizeof(PacketHeader));
-            std::memcpy(buffer.data() + sizeof(PacketHeader), x, dim * sizeof(float));
 
-            // Master sends to Next (Worker 1)
-            dist_config.transport->send_next(buffer.data(), buffer.size());
+            // Optimization: Zero-Copy Send
+            dist_config.transport->send_multipart_next(&header, sizeof(PacketHeader), x, dim * sizeof(float));
 
             if (flags == FLAG_NEED_REPLY) {
-                // Receive result from Next (Worker 1)
-                dist_config.transport->recv_next(x, dim * sizeof(float));
+                // Ring Synchronization (Stop-and-Wait):
+                size_t packet_size = sizeof(PacketHeader) + dim * sizeof(float);
+                if (transfer_buffer.size() < packet_size) transfer_buffer.resize(packet_size);
+
+                dist_config.transport->recv_prev(transfer_buffer.data(), packet_size);
+                
+                // Extract the data (skip header)
+                std::memcpy(x, transfer_buffer.data() + sizeof(PacketHeader), dim * sizeof(float));
             } else {
-                // Fire and forget
                 return nullptr;
             }
         }
@@ -990,39 +986,26 @@ namespace Inference {
         // end_layer logic consistent with FloatTransformer update
         // Use dist_config.end_layer if set (via main.cpp defaults to n_layers)
 
-        std::vector<char> buffer(sizeof(PacketHeader) + dim * sizeof(float));
+        size_t packet_size = sizeof(PacketHeader) + dim * sizeof(float);
+        if (transfer_buffer.size() < packet_size) transfer_buffer.resize(packet_size);
 
         std::cout << "Worker started. Processing layers " << start_layer << " to " << dist_config.end_layer - 1 << std::endl;
 
         while (true) {
             try {
                 // Receive header + data from Prev
-                dist_config.transport->recv_prev(buffer.data(), buffer.size());
+                dist_config.transport->recv_prev(transfer_buffer.data(), packet_size);
 
-                std::memcpy(&header, buffer.data(), sizeof(PacketHeader));
-                std::memcpy(x, buffer.data() + sizeof(PacketHeader), dim * sizeof(float));
+                std::memcpy(&header, transfer_buffer.data(), sizeof(PacketHeader));
+                std::memcpy(x, transfer_buffer.data() + sizeof(PacketHeader), dim * sizeof(float));
 
                 // Process layers
                 for (int l = start_layer; l < dist_config.end_layer; l++) {
                     run_layer(l, header.pos, x);
                 }
 
-                if (!dist_config.is_tail) {
-                    // Forward to Next
-                    std::memcpy(buffer.data() + sizeof(PacketHeader), x, dim * sizeof(float));
-                    dist_config.transport->send_next(buffer.data(), buffer.size());
-
-                    if (header.flags == FLAG_NEED_REPLY) {
-                        // Wait for reply from Next
-                        dist_config.transport->recv_next(x, dim * sizeof(float));
-                        // Forward reply to Prev
-                        dist_config.transport->send_prev(x, dim * sizeof(float));
-                    }
-                } else {
-                    // Tail: Send back if needed
-                    if (header.flags == FLAG_NEED_REPLY) {
-                        dist_config.transport->send_prev(x, dim * sizeof(float));
-                    }
+                if (!dist_config.is_tail || header.flags == FLAG_NEED_REPLY) {
+                    dist_config.transport->send_multipart_next(&header, sizeof(PacketHeader), x, dim * sizeof(float));
                 }
             } catch (const std::exception &e) {
                 std::cerr << "Worker loop error: " << e.what() << std::endl;

@@ -10,8 +10,8 @@
 #include <cstring>
 
 namespace Inference {
-    KernelTransport::KernelTransport(std::string dest_ip, int port, std::string next_ip, int next_port)
-        : dest_ip(std::move(dest_ip)), port(port), prev_ip(this->dest_ip), prev_port(port), 
+    KernelTransport::KernelTransport(int port, std::string next_ip, int next_port)
+        : port(port), prev_ip(""), prev_port(0), 
           next_ip(std::move(next_ip)), next_port(next_port) {
     }
 
@@ -40,8 +40,10 @@ namespace Inference {
             std::cerr << "Warning: Failed to set listening port in kernel" << std::endl;
         }
 
-        // Set Default Destination (Prev)
-        set_destination(prev_ip, prev_port);
+        // Only set destination if prev_ip is known (e.g. hardcoded or learned)
+        if (!prev_ip.empty()) {
+            set_destination(prev_ip, prev_port);
+        }
     }
 
     void KernelTransport::set_destination(const std::string& ip, int target_port) {
@@ -63,20 +65,8 @@ namespace Inference {
     }
 
     void KernelTransport::send(const void *data, const size_t size) {
-        if (size > LEAP_BUFFER_SIZE) {
-            throw std::runtime_error("Send size too large for LEAP buffer (Max: " + std::to_string(LEAP_BUFFER_SIZE) + ")");
-        }
-
-        // Zero-Copy Optimization with Double Buffering:
-        // Copy to TX buffer partition (Upper 8MB)
-        uint8_t* tx_buffer = static_cast<uint8_t*>(mmap_ptr) + LEAP_BUFFER_SIZE;
-        std::memcpy(tx_buffer, data, size);
-
-        // Trigger Send via IOCTL (Kernel reads from Upper 8MB)
-        unsigned int len = static_cast<unsigned int>(size);
-        if (ioctl(fd, LEAP_IOCTL_SEND, &len) < 0) {
-            throw std::runtime_error("Kernel send IOCTL failed");
-        }
+        // Default send -> send_next
+        send_next(data, size);
     }
 
     void KernelTransport::recv_internal(void *data, const size_t size, bool update_prev) {
@@ -112,26 +102,55 @@ namespace Inference {
     }
 
     void KernelTransport::recv(void *data, const size_t size) {
-        recv_internal(data, size, false); // Default recv doesn't update prev by default safely
+        recv_prev(data, size);
     }
 
     void KernelTransport::send_next(const void *data, size_t size) {
         if (next_ip.empty()) throw std::runtime_error("Next IP not configured for KernelTransport");
+        if (size > LEAP_BUFFER_SIZE) {
+             throw std::runtime_error("Send size too large for LEAP buffer");
+        }
         set_destination(next_ip, next_port);
-        send(data, size);
+        
+        // Zero-Copy Optimization with Double Buffering:
+        // Copy to TX buffer partition (Upper 8MB)
+        uint8_t* tx_buffer = static_cast<uint8_t*>(mmap_ptr) + LEAP_BUFFER_SIZE;
+        std::memcpy(tx_buffer, data, size);
+
+        // Trigger Send via IOCTL (Kernel reads from Upper 8MB)
+        unsigned int len = static_cast<unsigned int>(size);
+        if (ioctl(fd, LEAP_IOCTL_SEND, &len) < 0) {
+            throw std::runtime_error("Kernel send IOCTL failed");
+        }
+    }
+
+    void KernelTransport::send_multipart_next(const void* header, size_t header_size, const void* data, size_t data_size) {
+        if (next_ip.empty()) throw std::runtime_error("Next IP not configured for KernelTransport");
+        
+        size_t total_size = header_size + data_size;
+        if (total_size > LEAP_BUFFER_SIZE) {
+             throw std::runtime_error("Send size too large for LEAP buffer");
+        }
+        set_destination(next_ip, next_port);
+        
+        uint8_t* tx_buffer = static_cast<uint8_t*>(mmap_ptr) + LEAP_BUFFER_SIZE;
+        
+        // Scatter/Gather Copy into contiguous kernel buffer
+        std::memcpy(tx_buffer, header, header_size);
+        std::memcpy(tx_buffer + header_size, data, data_size);
+
+        unsigned int len = static_cast<unsigned int>(total_size);
+        if (ioctl(fd, LEAP_IOCTL_SEND, &len) < 0) {
+            throw std::runtime_error("Kernel send IOCTL failed");
+        }
     }
 
     void KernelTransport::recv_next(void *data, size_t size) {
-        // Recv from next node - DO NOT update prev_ip
-        recv_internal(data, size, false);
+         throw std::runtime_error("recv_next not supported in Ring");
     }
 
     void KernelTransport::send_prev(const void *data, size_t size) {
-        // Explicitly set port to prev_port. Relying on kernel's learned port is unsafe
-        // because send_next() overwrites the global dest_port in the kernel module.
-        // This assumes symmetric port configuration (Prev listens on prev_port).
-        set_destination(prev_ip, prev_port); 
-        send(data, size);
+        throw std::runtime_error("send_prev not supported in Ring");
     }
 
     void KernelTransport::recv_prev(void *data, size_t size) {

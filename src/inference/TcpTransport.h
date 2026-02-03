@@ -7,32 +7,34 @@
 namespace Inference {
     class TcpTransport : public Transport {
     public:
-        // is_server = true -> Worker (listens on ip:port, optionally connects to next_ip:next_port)
-        // is_server = false -> Master (connects to ip:port)
-        TcpTransport(std::string ip, int port, bool is_server, std::string next_ip = "", int next_port = 0);
+        // Symmetric Ring Topology:
+        // - Binds to `port` (Ingress from Prev)
+        // - Connects to `next_ip:next_port` (Egress to Next)
+        TcpTransport(std::string ip, int port, std::string next_ip, int next_port);
 
         ~TcpTransport() override;
 
         void initialize() override;
 
-        void send(const void *data, size_t size) override; // Legacy/Context-aware
-        void recv(void *data, size_t size) override;       // Legacy/Context-aware
+        void send(const void *data, size_t size) override; // Default: send_next
+        void recv(void *data, size_t size) override;       // Default: recv_prev
 
         void send_next(const void *data, size_t size) override;
         void recv_next(void *data, size_t size) override;
         void send_prev(const void *data, size_t size) override;
         void recv_prev(void *data, size_t size) override;
+        
+        void send_multipart_next(const void* header, size_t header_size, const void* data, size_t data_size) override;
 
     private:
         std::string ip;
         int port;
-        bool is_server;
         std::string next_ip;
         int next_port;
 
-        int sockfd = -1;    // Listening socket (if server) or Egress socket (if master)
-        int ingress_fd = -1; // Incoming connection from Previous (if server)
-        int egress_fd = -1;  // Outgoing connection to Next (if worker has next, or master)
+        int sockfd = -1;    // Listening socket
+        int ingress_fd = -1; // Incoming connection from Previous
+        int egress_fd = -1;  // Outgoing connection to Next
 
         void setup_socket_low_latency(int fd);
     };

@@ -685,12 +685,6 @@ namespace Inference {
         if (dist_config.mode == DistributedMode::Master) {
             if (!dist_config.transport) throw std::runtime_error("Transport not set for master");
 
-            // Combine Header and x into one buffer
-            // Safety check for kernel transport limits
-            if (sizeof(PacketHeader) + dim * sizeof(float) > LEAP_RX_BANK_SIZE) {
-                throw std::runtime_error("Packet size exceeds LEAP_RX_BANK_SIZE. Reduce model dimension or increase buffer size.");
-            }
-
             std::vector<char> buffer(sizeof(PacketHeader) + dim * sizeof(float));
             PacketHeader header{pos, flags};
             
@@ -701,11 +695,9 @@ namespace Inference {
             dist_config.transport->send_next(buffer.data(), buffer.size());
 
             if (flags == FLAG_NEED_REPLY) {
-                // Receive result from Next (Worker 1)
-                dist_config.transport->recv_next(x, dim * sizeof(float));
+                // In Ring Topology, Master receives result from Prev (Tail Worker)
+                dist_config.transport->recv_prev(x, dim * sizeof(float));
             } else {
-                // Fire and forget, return null or dummy
-                // The caller should know not to use the result if flags=NO_REPLY
                 return nullptr;
             }
         }
@@ -723,8 +715,6 @@ namespace Inference {
         PacketHeader header{};
 
         const int start_layer = dist_config.split_layer;
-        
-        // Process layers assigned to this worker [split_layer, end_layer)
         std::vector<char> buffer(sizeof(PacketHeader) + dim * sizeof(float));
 
         std::cout << "Worker started. Processing layers " << start_layer << " to " << dist_config.end_layer - 1 << std::endl;
@@ -742,25 +732,12 @@ namespace Inference {
                     run_layer(l, header.pos, x);
                 }
 
-                if (!dist_config.is_tail) {
-                    // Forward to Next
-                    // Re-use buffer, update x content
-                    std::memcpy(buffer.data() + sizeof(PacketHeader), x, dim * sizeof(float));
-                    dist_config.transport->send_next(buffer.data(), buffer.size());
+                // In Ring Topology, everyone just forwards to Next
+                // If this is the Tail Worker, next_host is the Master.
+                std::memcpy(buffer.data() + sizeof(PacketHeader), x, dim * sizeof(float));
+                dist_config.transport->send_next(buffer.data(), buffer.size());
 
-                    if (header.flags == FLAG_NEED_REPLY) {
-                        // Wait for reply from Next
-                        dist_config.transport->recv_next(x, dim * sizeof(float));
-                        // Forward reply to Prev
-                        dist_config.transport->send_prev(x, dim * sizeof(float));
-                    }
-                    // If NO_REPLY, we are done with this token for this direction.
-                } else {
-                    // Tail: Send back if needed
-                    if (header.flags == FLAG_NEED_REPLY) {
-                        dist_config.transport->send_prev(x, dim * sizeof(float));
-                    }
-                }
+                // No manual reply-handling or reverse-path forwarding needed in a Ring!
 
             } catch (const std::exception &e) {
                 std::cerr << "Worker loop error: " << e.what() << std::endl;

@@ -958,7 +958,11 @@ namespace Inference {
             dist_config.transport->send_next(buffer.data(), buffer.size());
 
             // Ring Synchronization: Always receive to clear buffer/maintain order
-            dist_config.transport->recv_prev(x, dim * sizeof(float));
+            // IMPORTANT: Receive into 'buffer', not 'x', to avoid header corruption.
+            dist_config.transport->recv_prev(buffer.data(), buffer.size());
+            
+            // Extract the data (skip header)
+            std::memcpy(x, buffer.data() + sizeof(PacketHeader), dim * sizeof(float));
 
             if (flags != FLAG_NEED_REPLY) {
                 return nullptr;

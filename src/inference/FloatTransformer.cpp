@@ -698,7 +698,13 @@ namespace Inference {
             // Master MUST always receive the result from the Tail Worker to maintain
             // lock-step synchronization and clear the socket buffer.
             // Even if flags == NO_REPLY, the data traveled the ring and is waiting at our door.
-            dist_config.transport->recv_prev(x, dim * sizeof(float));
+            
+            // IMPORTANT: Receive into 'buffer', not 'x', because the incoming packet
+            // contains [Header | Data]. If we recv into 'x', the Header overwrites the first floats!
+            dist_config.transport->recv_prev(buffer.data(), buffer.size());
+            
+            // Extract the data (skip header)
+            std::memcpy(x, buffer.data() + sizeof(PacketHeader), dim * sizeof(float));
 
             if (flags != FLAG_NEED_REPLY) {
                 return nullptr;

@@ -949,22 +949,15 @@ namespace Inference {
         if (dist_config.mode == DistributedMode::Master) {
             if (!dist_config.transport) throw std::runtime_error("Transport not set for master");
 
-            // Resize reusable buffer if needed
-            size_t packet_size = sizeof(PacketHeader) + dim * sizeof(float);
-            if (transfer_buffer.size() < packet_size) transfer_buffer.resize(packet_size);
-
             PacketHeader header{pos, flags};
-            
-            std::memcpy(transfer_buffer.data(), &header, sizeof(PacketHeader));
-            std::memcpy(transfer_buffer.data() + sizeof(PacketHeader), x, dim * sizeof(float));
 
-            // Master sends to Next (Worker 1)
-            dist_config.transport->send_next(transfer_buffer.data(), packet_size);
+            // Optimization: Zero-Copy Send
+            dist_config.transport->send_multipart_next(&header, sizeof(PacketHeader), x, dim * sizeof(float));
 
             if (flags == FLAG_NEED_REPLY) {
                 // Ring Synchronization (Stop-and-Wait):
-                // Only wait for reply if we actually asked for one.
-                // For NO_REPLY (Prompt Phase), we Pipeline (Fire-and-Forget).
+                size_t packet_size = sizeof(PacketHeader) + dim * sizeof(float);
+                if (transfer_buffer.size() < packet_size) transfer_buffer.resize(packet_size);
 
                 dist_config.transport->recv_prev(transfer_buffer.data(), packet_size);
                 
@@ -1012,8 +1005,7 @@ namespace Inference {
                 }
 
                 if (!dist_config.is_tail || header.flags == FLAG_NEED_REPLY) {
-                    std::memcpy(transfer_buffer.data() + sizeof(PacketHeader), x, dim * sizeof(float));
-                    dist_config.transport->send_next(transfer_buffer.data(), packet_size);
+                    dist_config.transport->send_multipart_next(&header, sizeof(PacketHeader), x, dim * sizeof(float));
                 }
             } catch (const std::exception &e) {
                 std::cerr << "Worker loop error: " << e.what() << std::endl;

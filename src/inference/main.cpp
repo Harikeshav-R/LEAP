@@ -167,6 +167,9 @@ int main(int argc, char *argv[]) {
     std::string model_path;
     std::string tokenizer_path = "tokenizer.bin";
     app.add_option("model", model_path, "Path to model (.bin)")->required()->check(CLI::ExistingFile);
+    app.add_option("-t,--tokenizer", tokenizer_path, "Path to tokenizer (.bin)")
+        ->check(CLI::ExistingFile)
+        ->capture_default_str();
 
     std::string role = "single";
     app.add_option("--role", role, "Node role: single, master, worker")->capture_default_str();

@@ -81,16 +81,11 @@ LEAP uses a custom BPE tokenizer implementation designed for zero-dependency inf
 ## 4. Inference Engine (`src/inference/`)
 
 
-
 The core engine implements a standard Llama-2/3 architecture: RMSNorm, SwiGLU FeedForward, and Rotary Positional Embeddings (RoPE). It is built for maximum efficiency on CPU, utilizing two distinct transformer implementations.
-
-
 
 ### 4.1. FloatTransformer (Pure FP32)
 
 The `FloatTransformer` is the baseline implementation offering maximum precision. It is designed around zero-copy memory mapping and rigorous loop optimization.
-
-
 
 #### Architecture & Memory Layout
 
@@ -143,12 +138,9 @@ For every token, the engine performs the following operations per layer:
     *   Residual connection: `x += Down`.
 
 
-
 ### 4.2. QuantizedTransformer (W8A8 Dynamic)
 
 The `QuantizedTransformer` reduces memory usage by 4x and increases compute throughput by utilizing integer arithmetic. It implements a **Weight-Int8, Activation-Int8 (W8A8)** scheme with dynamic activation quantization.
-
-
 
 #### Quantization Scheme
 
@@ -330,7 +322,6 @@ cmake --build build --config Release -- -j$(nproc)
 ## 7. Usage
 
 
-
 ### 1. Export Tool (`export`)
 
 Converts PyTorch/Safetensors checkpoints into the LEAP binary format.
@@ -341,7 +332,7 @@ Converts PyTorch/Safetensors checkpoints into the LEAP binary format.
 
 ```bash
 
-./export <output_filepath> --meta-llama <path_to_model_dir> [options]
+./export <output_filepath> --meta-llama <path_to_model_dir> [options] 
 
 ```
 
@@ -482,3 +473,36 @@ The main runtime for generating text. Supports single-node and distributed ring 
 ./inference --model model.bin --role worker --split 16 --next-host 192.168.1.1
 
 ```
+
+## 8. Performance & Troubleshooting
+
+### Supported Models
+LEAP is designed for **Llama Architecture** models.
+*   **Supported**: Llama 2, Llama 3, Llama 3.1, CodeLlama, TinyLlama.
+*   **Key Features**: Grouped Query Attention (GQA), RoPE, RMSNorm, SwiGLU.
+
+### Performance Tuning (OpenMP)
+For maximum inference speed, ensure OpenMP threads are pinned to physical cores.
+```bash
+# Example for a 8-core CPU
+export OMP_NUM_THREADS=8
+export OMP_PROC_BIND=close
+export OMP_PLACES=cores
+./inference ...
+```
+*Note: On hybrid CPUs (Intel 12th+ Gen), bind threads to P-cores for best results.*
+
+### Troubleshooting
+
+#### 1. LibTorch ABI Error (`std::__cxx11::basic_string`)
+**Error**: Linker errors complaining about `std::string` symbols.
+**Fix**: Ensure you downloaded the **cxx11 ABI** version of LibTorch. If you used `pip install torch`, this is usually handled automatically, but ensure your system GCC matches the one PyTorch was built with.
+
+#### 2. Kernel Module Load Failed
+**Error**: `insmod: ERROR: could not insert module ...: Operation not permitted`
+**Fix**: Secure Boot may block unsigned modules. You must either sign the module or disable Secure Boot.
+**Error**: `Exec format error`
+**Fix**: The module was compiled for a different kernel version. Re-run `make` inside `src/kernel/` or rebuild via CMake.
+
+#### 3. Network Unreachable (UDP/Kernel)
+**Fix**: Check your firewall (`ufw status`, `iptables`). LEAP uses UDP ports (default 9999). Ensure `ICMP` isn't blocking path MTU discovery if you aren't using the kernel module (which handles fragmentation manually via chunks).

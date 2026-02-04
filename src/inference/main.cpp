@@ -217,7 +217,14 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, cons
         }
 
         const int flags = (user_idx < static_cast<int>(prompt_tokens.size())) ? FLAG_NO_REPLY : FLAG_NEED_REPLY;
-        float *logits = transformer->forward(token, pos, flags);
+        
+        // Force synchronization during recompute to ensure perfect cache rebuilding
+        int effective_flags = flags;
+        if (recomputing) {
+            effective_flags = FLAG_NEED_REPLY;
+        }
+
+        float *logits = transformer->forward(token, pos, effective_flags);
 
         // --- AUTOMATIC REWIND CHECK ---
         if (transformer->needs_rewind) {

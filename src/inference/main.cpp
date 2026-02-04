@@ -186,21 +186,20 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, cons
             token = next;
         }
 
-        // Add to history
-        if (!recomputing || user_idx > static_cast<int>(history_tokens.size())) {
-             // Only append if it's new (not recomputing old history)
-             // Actually during recompute, we just read from prompt_tokens (which is old history)
-             // We don't need to append.
-             // But if we are Generating (user_idx exhausted), we append 'next'
+        // Add to history (Only the input token is safe to add here)
+        if (!recomputing) {
+             history_tokens.push_back(token);
+        }
+
+        // Check if we are done recomputing
+        if (recomputing && user_idx >= static_cast<int>(prompt_tokens.size())) {
+            recomputing = false;
+            // Do NOT set user_turn = true; we might be in the middle of assistant generation
+            // prompt_tokens is now exhausted, so the loop will naturally fall through to sampling 'next'
         }
 
         if (user_idx >= static_cast<int>(prompt_tokens.size()) && (token == 128009 || token == 128001)) {
-            if (recomputing) {
-                recomputing = false; // Done re-evaluating
-                user_turn = true;
-                prompt_tokens.clear(); // Clear re-eval buffer
-                continue; // Go back to user input
-            } else {
+            if (!recomputing) {
                 user_turn = true;
             }
         }
@@ -212,6 +211,10 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, cons
         if (transformer->needs_rewind) {
             transformer->needs_rewind = false;
             std::cout << "\n[System] Automatic load balance: Re-evaluating context..." << std::endl;
+            // Pop the last token because it was processed on the OLD config and triggered the rewind.
+            // We want to re-process it on the NEW config.
+            if (!history_tokens.empty()) history_tokens.pop_back(); 
+            
             prompt_tokens = history_tokens;
             pos = 0;
             user_idx = 0;
@@ -226,14 +229,6 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, cons
             next = sampler->sample(logits);
         }
 
-        // Store history
-        if (!recomputing) {
-            // If this token was from prompt, it's already in history? No.
-            // We need to build history linearly.
-            // Simplest way: just push 'token' to history every step.
-             history_tokens.push_back(token);
-        }
-
         pos++;
 
         if (user_idx >= static_cast<int>(prompt_tokens.size()) && (next == 128009 || next == 128001)) {
@@ -246,7 +241,7 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, cons
                 const std::string &piece = tokenizer->decode(token, next);
                 Utils::safe_print(piece);
                 std::cout.flush();
-                history_tokens.push_back(next); // Store generated token
+                // history_tokens.push_back(next); // REMOVED: Next iteration will push this as 'token'
             }
         }
     }

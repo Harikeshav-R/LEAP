@@ -67,7 +67,8 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, cons
           const std::string &cli_system_prompt, const int steps) {
     std::string system_prompt_str;
     std::string user_prompt_str;
-    std::vector<int> prompt_tokens;
+    std::vector<int> prompt_tokens; // Current turn tokens or history for re-eval
+    std::vector<int> history_tokens; // Full conversation history
 
     prompt_tokens.reserve(steps);
 
@@ -76,9 +77,10 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, cons
     int next = 0;
     int token;
     int pos = 0;
+    bool recomputing = false; // Flag to suppress output during re-eval
 
     while (pos < steps) {
-        if (user_turn) {
+        if (user_turn && !recomputing) {
             if (pos == 0) {
                 prompt_tokens.push_back(128000); // <|begin_of_text|>
                 prompt_tokens.push_back(128006); // <|start_header_id|>
@@ -109,57 +111,58 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, cons
             if (pos == 0 && !cli_user_prompt.empty()) {
                 user_prompt_str = cli_user_prompt;
             } else {
-                read_stdin("User (or exit): ", user_prompt_str);
-                if (user_prompt_str == "exit") break;
-                
-                if (user_prompt_str.rfind("/layer", 0) == 0) {
-                    std::istringstream iss(user_prompt_str);
-                    std::string cmd;
-                    iss >> cmd; 
-                    std::vector<int> splits;
-                    int val;
-                    while (iss >> val) {
-                        splits.push_back(val);
-                    }
+                while (true) {
+                    read_stdin("User (or exit): ", user_prompt_str);
+                    if (user_prompt_str == "exit") break;
                     
-                    if (splits.empty()) {
-                        std::cout << "Usage: /layer <end_layer_node0> <end_layer_node1> ... (e.g., /layer 16 32)" << std::endl;
-                    } else {
-                        std::vector<LayerConfig> configs;
-                        int start = 0;
-                        for (int end : splits) {
-                            configs.push_back({start, end});
-                            start = end;
+                    if (user_prompt_str.rfind("/layer", 0) == 0) {
+                        std::istringstream iss(user_prompt_str);
+                        std::string cmd;
+                        iss >> cmd; 
+                        std::vector<int> splits;
+                        int val;
+                        while (iss >> val) {
+                            splits.push_back(val);
                         }
-                        transformer->distribute_config(configs);
+                        
+                        if (splits.empty()) {
+                            std::cout << "Usage: /layer <end_layer_node0> <end_layer_node1> ... (e.g., /layer 16 32)" << std::endl;
+                        } else {
+                            std::vector<LayerConfig> configs;
+                            int start = 0;
+                            for (int end : splits) {
+                                configs.push_back({start, end});
+                                start = end;
+                            }
+                            transformer->distribute_config(configs);
+                            
+                            // --- REWIND LOGIC ---
+                            std::cout << "[System] Re-evaluating context (" << history_tokens.size() << " tokens)..." << std::endl;
+                            prompt_tokens = history_tokens; // Load full history as prompt
+                            pos = 0;
+                            user_idx = 0;
+                            recomputing = true;
+                            user_turn = false; // Bypass user input logic, go straight to processing
+                            break; // Break inner input loop to start processing
+                        }
+                        continue; 
+                    } else if (user_prompt_str == "/stats") {
+                        std::vector<NodeStats> stats = transformer->collect_stats();
+                        std::cout << "\n--- Cluster Statistics ---\n";
+                        std::cout << "Node | CPU(%) | RAM(%) | Temp(C) | Layers\n";
+                        std::cout << "-----|--------|--------|---------|-------\n";
+                        for (size_t i = 0; i < stats.size(); i++) {
+                            std::printf("  %zu  |  %5.1f |  %5.1f |  %5.1f  | %d-%d\n", 
+                                        i, stats[i].cpu_usage, stats[i].ram_usage, stats[i].temperature,
+                                        stats[i].split_layer, stats[i].end_layer);
+                        }
+                        std::cout << "--------------------------\n\n";
+                        continue;
                     }
-                    // Skip inference for this turn, reset loop to prompt again?
-                    // The loop continues, but "user_turn" logic is tricky. 
-                    // We need to NOT add this to prompt_tokens.
-                    // Resetting state:
-                    prompt_tokens.clear(); // Clear the partial prompt building
-                    user_turn = true; // Stay in user turn
-                    pos = 0; // Reset pos if we want to restart? 
-                    // Actually, if we are in chat loop, 'pos' tracks total tokens generated. 
-                    // If we just continue, it will try to encode "/layer..." as prompt.
-                    // We need to bypass the rest of the loop.
-                    continue; 
-                } else if (user_prompt_str == "/stats") {
-                     std::vector<NodeStats> stats = transformer->collect_stats();
-                     std::cout << "\n--- Cluster Statistics ---\n";
-                     std::cout << "Node | CPU(%) | RAM(%) | Temp(C) | Layers\n";
-                     std::cout << "-----|--------|--------|---------|-------\n";
-                     for (size_t i = 0; i < stats.size(); i++) {
-                         std::printf("  %zu  |  %5.1f |  %5.1f |  %5.1f  | %d-%d\n", 
-                                     i, stats[i].cpu_usage, stats[i].ram_usage, stats[i].temperature,
-                                     stats[i].split_layer, stats[i].end_layer);
-                     }
-                     std::cout << "--------------------------\n\n";
-                     
-                     prompt_tokens.clear();
-                     user_turn = true;
-                     continue;
+                    break;
                 }
+                if (user_prompt_str == "exit") break;
+                if (recomputing) continue; // Restart loop to process history
             }
 
             std::vector<int> usr_tokens;
@@ -183,8 +186,23 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, cons
             token = next;
         }
 
+        // Add to history
+        if (!recomputing || user_idx > static_cast<int>(history_tokens.size())) {
+             // Only append if it's new (not recomputing old history)
+             // Actually during recompute, we just read from prompt_tokens (which is old history)
+             // We don't need to append.
+             // But if we are Generating (user_idx exhausted), we append 'next'
+        }
+
         if (user_idx >= static_cast<int>(prompt_tokens.size()) && (token == 128009 || token == 128001)) {
-            user_turn = true;
+            if (recomputing) {
+                recomputing = false; // Done re-evaluating
+                user_turn = true;
+                prompt_tokens.clear(); // Clear re-eval buffer
+                continue; // Go back to user input
+            } else {
+                user_turn = true;
+            }
         }
 
         const int flags = (user_idx < static_cast<int>(prompt_tokens.size())) ? FLAG_NO_REPLY : FLAG_NEED_REPLY;
@@ -196,15 +214,28 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, cons
             next = sampler->sample(logits);
         }
 
+        // Store history
+        if (!recomputing) {
+            // If this token was from prompt, it's already in history? No.
+            // We need to build history linearly.
+            // Simplest way: just push 'token' to history every step.
+             history_tokens.push_back(token);
+        }
+
         pos++;
 
         if (user_idx >= static_cast<int>(prompt_tokens.size()) && (next == 128009 || next == 128001)) {
             std::cout << std::endl;
+            if (!recomputing) history_tokens.push_back(next); // Store EOT
         }
+        
         if (user_idx >= static_cast<int>(prompt_tokens.size()) && next != 128009 && next != 128001 && next != 128006) {
-            const std::string &piece = tokenizer->decode(token, next);
-            Utils::safe_print(piece);
-            std::cout.flush();
+            if (!recomputing) {
+                const std::string &piece = tokenizer->decode(token, next);
+                Utils::safe_print(piece);
+                std::cout.flush();
+                history_tokens.push_back(next); // Store generated token
+            }
         }
     }
     std::cout << std::endl;

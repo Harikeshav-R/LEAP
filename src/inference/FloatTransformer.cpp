@@ -969,7 +969,12 @@ namespace Inference {
     }
 
     void FloatTransformer::clear_cache() {
-        std::fill(state.key_cache.begin(), state.key_cache.end(), 0.0f);
-        std::fill(state.value_cache.begin(), state.value_cache.end(), 0.0f);
+        if (!state.key_cache.empty()) {
+            std::memset(state.key_cache.data(), 0, state.key_cache.size() * sizeof(float));
+        }
+        if (!state.value_cache.empty()) {
+            std::memset(state.value_cache.data(), 0, state.value_cache.size() * sizeof(float));
+        }
+        std::cout << "[Info] Cache cleared (Size: " << state.key_cache.size() << ")" << std::endl;
     }
 } // namespace Inference

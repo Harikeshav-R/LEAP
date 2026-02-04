@@ -1052,9 +1052,17 @@ namespace Inference {
 
         if (dist_config.mode == DistributedMode::Master) {
             if (!dist_config.transport) throw std::runtime_error("Transport not set for master");
-            PacketHeader header{0x4C454150, PacketType::Inference, (uint32_t)start_pos, (uint32_t)n_tokens, FLAG_NO_REPLY};
+            
+            // Sync wait
+            PacketHeader header{0x4C454150, PacketType::Inference, (uint32_t)start_pos, (uint32_t)n_tokens, FLAG_NEED_REPLY};
             header.payload_size = n_tokens * dim * sizeof(float);
+            
             dist_config.transport->send_multipart_next(&header, sizeof(PacketHeader), batch_x.data(), header.payload_size);
+            
+            if (transfer_buffer.size() < sizeof(PacketHeader) + header.payload_size)
+                transfer_buffer.resize(sizeof(PacketHeader) + header.payload_size);
+            
+            dist_config.transport->recv_prev(transfer_buffer.data(), sizeof(PacketHeader) + header.payload_size);
         }
     }
 

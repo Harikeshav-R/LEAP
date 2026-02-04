@@ -108,6 +108,8 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, cons
             prompt_tokens.push_back(882); // user
             prompt_tokens.push_back(128007); // <|end_header_id|>
             prompt_tokens.push_back(271); // \n\n
+            bool command_handled = false;
+
             if (pos == 0 && !cli_user_prompt.empty()) {
                 user_prompt_str = cli_user_prompt;
             } else {
@@ -143,6 +145,7 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, cons
                             user_idx = 0;
                             recomputing = true;
                             user_turn = false; // Bypass user input logic, go straight to processing
+                            command_handled = true;
                             break; // Break inner input loop to start processing
                         }
                         continue; 
@@ -165,19 +168,21 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, cons
                 if (recomputing) continue; // Restart loop to process history
             }
 
-            std::vector<int> usr_tokens;
-            int n_usr = 0;
-            tokenizer->encode(user_prompt_str, false, false, usr_tokens, n_usr);
-            prompt_tokens.insert(prompt_tokens.end(), usr_tokens.begin(), usr_tokens.begin() + n_usr);
+            if (!command_handled) {
+                std::vector<int> usr_tokens;
+                int n_usr = 0;
+                tokenizer->encode(user_prompt_str, false, false, usr_tokens, n_usr);
+                prompt_tokens.insert(prompt_tokens.end(), usr_tokens.begin(), usr_tokens.begin() + n_usr);
 
-            prompt_tokens.push_back(128009); // <|eot_id|>
-            prompt_tokens.push_back(128006); // <|start_header_id|>
-            prompt_tokens.push_back(78191); // assistant
-            prompt_tokens.push_back(128007); // <|end_header_id|>
-            prompt_tokens.push_back(271); // \n\n
-            user_idx = 0;
-            user_turn = false;
-            std::cout << "Assistant: ";
+                prompt_tokens.push_back(128009); // <|eot_id|>
+                prompt_tokens.push_back(128006); // <|start_header_id|>
+                prompt_tokens.push_back(78191); // assistant
+                prompt_tokens.push_back(128007); // <|end_header_id|>
+                prompt_tokens.push_back(271); // \n\n
+                user_idx = 0;
+                user_turn = false;
+                std::cout << "Assistant: ";
+            }
         }
 
         if (user_idx < static_cast<int>(prompt_tokens.size())) {

@@ -90,8 +90,11 @@ namespace Tokenizer {
     }
 
 
-    void Tokenizer::export_tokenized_binary_file() const {
-        std::string output_path = model_path_.substr(0, model_path_.find_last_of('.')) + ".bin";
+    void Tokenizer::export_tokenized_binary_file(const std::string &output_path_arg) const {
+        std::string output_path = output_path_arg;
+        if (output_path.empty()) {
+            output_path = model_path_.substr(0, model_path_.find_last_of('.')) + ".bin";
+        }
         std::ofstream out(output_path, std::ios::binary);
         if (!out) {
             throw std::runtime_error("Failed to open output file: " + output_path);

@@ -2,84 +2,11 @@
 #include <string>
 #include <stdexcept>
 
-// Include your project headers
+#include <CLI/CLI.hpp>
+
 #include "Export.h"
 #include "Loader.h"
 #include <model/Transformer.h>
-
-// -----------------------------------------------------------------------------
-// Helper: Simple CLI Argument Parser Structure
-struct ProgramArgs {
-    std::string filepath;
-    std::string meta_llama_path;
-    int version = 1;
-};
-
-void print_usage(const char *program_name) {
-    std::cerr << "usage: " << program_name << " [-h] [--version VERSION] --meta-llama META_LLAMA filepath\n\n"
-            << "positional arguments:\n"
-            << "  filepath              the output filepath\n\n"
-            << "optional arguments:\n"
-            << "  -h, --help            show this help message and exit\n"
-            << "  --version VERSION     the version to export with (1=fp32, 2=int8) (default: 1)\n"
-            << "  --meta-llama          meta llama model path (required)\n";
-}
-
-ProgramArgs parse_arguments(const int argc, char *argv[]) {
-    ProgramArgs args;
-    bool meta_llama_set = false;
-    bool filepath_set = false;
-
-    for (int i = 1; i < argc; ++i) {
-        if (std::string arg = argv[i]; arg == "-h" || arg == "--help") {
-            print_usage(argv[0]);
-            std::exit(0);
-        } else if (arg == "--version") {
-            if (i + 1 < argc) {
-                args.version = std::stoi(argv[++i]);
-            } else {
-                std::cerr << "Error: --version requires an argument.\n";
-                std::exit(1);
-            }
-        } else if (arg == "--meta-llama") {
-            if (i + 1 < argc) {
-                args.meta_llama_path = argv[++i];
-                meta_llama_set = true;
-            } else {
-                std::cerr << "Error: --meta-llama requires a path argument.\n";
-                std::exit(1);
-            }
-        } else if (arg[0] == '-') {
-            std::cerr << "Error: Unknown argument " << arg << "\n";
-            print_usage(argv[0]);
-            std::exit(1);
-        } else {
-            // Assume positional argument is filepath
-            if (!filepath_set) {
-                args.filepath = arg;
-                filepath_set = true;
-            } else {
-                std::cerr << "Error: Too many positional arguments provided.\n";
-                print_usage(argv[0]);
-                std::exit(1);
-            }
-        }
-    }
-
-    if (!filepath_set) {
-        std::cerr << "Error: the following arguments are required: filepath\n";
-        print_usage(argv[0]);
-        std::exit(1);
-    }
-
-    if (!meta_llama_set) {
-        std::cerr << "Error: the following arguments are required: --meta-llama\n";
-        print_usage(argv[0]);
-        std::exit(1);
-    }
-
-    return args;
-}
 
 // -----------------------------------------------------------------------------
 // Core Logic
@@ -99,12 +26,32 @@ void model_export(const Model::Transformer &model, const std::string &filepath, 
 // Main Entry Point
 
 int main(const int argc, char *argv[]) {
-    try {
-        // 1. Parse Args
-        auto [filepath, meta_llama_path, version] = parse_arguments(argc, argv);
+    CLI::App app{"LEAP Model Exporter"};
+    app.footer("Example:\n  ./export output.bin --meta-llama /path/to/llama-model-folder --version 2");
 
-        // 2. Load Model
-        // Note: C++ LibTorch functions typically throw exceptions on failure 
+    std::string filepath;
+    std::string meta_llama_path;
+    int version = 1;
+
+    // Positional argument: output file
+    app.add_option("filepath", filepath, "The output filepath for the binary model")
+            ->required();
+
+    // Required flag: input model directory
+    app.add_option("--meta-llama", meta_llama_path,
+                   "Path to the Meta Llama model directory (containing params.json and .safetensors)")
+            ->required()
+            ->check(CLI::ExistingDirectory);
+
+    // Optional flag: version
+    app.add_option("--version", version, "The export format version (1=fp32, 2=int8)")
+            ->default_val(1)
+            ->check(CLI::Range(1, 2));
+
+    CLI11_PARSE(app, argc, argv);
+
+    try {
+        // 2. Load Model        // Note: C++ LibTorch functions typically throw exceptions on failure
         // rather than returning None/nullptr, so we wrap in try/catch.
         std::cout << "Loading model from " << meta_llama_path << "..." << std::endl;
 

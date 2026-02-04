@@ -308,7 +308,7 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=$TORCH_PATH
 
 #### Compile
 ```bash
-cmake --build build --config Release -- -j$(nproc)
+cmake --build build --target all --config Release -- -j$(nproc)
 ```
 
 ### 4. Build with Kernel Module (Linux Only)
@@ -321,157 +321,96 @@ cmake --build build --config Release -- -j$(nproc)
 
 ## 7. Usage
 
-
 ### 1. Export Tool (`export`)
 
 Converts PyTorch/Safetensors checkpoints into the LEAP binary format.
 
-
-
 **Usage:**
-
 ```bash
-
-./export <output_filepath> --meta-llama <path_to_model_dir> [options] 
-
+./export [options] <output_filepath>
 ```
 
-
-
-**Arguments:**
-
+**Positional Arguments:**
 *   `output_filepath`: The destination path for the `.bin` model file.
 
+**Options:**
 *   `--meta-llama <path>`: (Required) Path to the directory containing the Llama model (`params.json` and `.safetensors` files).
-
 *   `--version <1|2>`:
-
     *   `1`: Float32 export (Default).
-
     *   `2`: Int8 Quantized export.
 
-
-
 **Example:**
-
 ```bash
-
 # Export Llama-3-8B to Int8
-
 ./export llama3-8b-int8.bin --meta-llama /models/Meta-Llama-3-8B --version 2
-
 ```
-
-
 
 ### 2. Tokenizer Tool (`tokenizer`)
 
 Converts a HuggingFace/Tiktoken tokenizer model (usually `tokenizer.model`) into LEAP's binary format.
 
-
-
 **Usage:**
-
 ```bash
-
-./tokenizer <path_to_tokenizer.model>
-
+./tokenizer [options] <model_path>
 ```
 
-*   The output will be saved as `tokenizer.bin` in the same directory as the input.
+**Positional Arguments:**
+*   `model_path`: Path to the tokenizer model file.
 
+**Options:**
+*   `-o, --output <path>`: Optional output file path for the binary export.
 
+If output is not specified, it will be saved as `tokenizer.bin` in the same directory as the input.
 
 ### 3. Inference Engine (`inference`)
 
 The main runtime for generating text. Supports single-node and distributed ring inference.
 
-
-
 **Usage:**
-
 ```bash
-
-./inference --model <path> [options]
-
+./inference [options] <model_path>
 ```
 
-
+**Positional Arguments:**
+*   `model_path`: (Required) Path to the exported LEAP model (`.bin`).
 
 #### General Options
-
-*   `--model <path>`: (Required) Path to the exported LEAP model (`.bin`).
-
 *   `-t, --tokenizer <path>`: Path to the tokenizer file (default: `tokenizer.bin`).
-
 *   `-p, --prompt <text>`: Initial prompt to start generation.
-
 *   `-c, --chat`: Enable interactive chat mode (Llama 3 instruction template).
-
 *   `-s, --system <text>`: System prompt (only for chat mode).
-
 *   `-n, --n-predict <int>`: Maximum number of tokens to generate (default: 4096).
 
-
-
 #### Sampling Parameters
-
 *   `--temp <float>`: Temperature for sampling (default: 1.0). Higher = more creative, Lower = more deterministic.
-
 *   `--top-p <float>`: Top-P (Nucleus) sampling threshold (default: 0.9).
-
 *   `--seed <int>`: Random seed for reproducibility (default: 0 = random).
 
-
-
 #### Distributed Inference Options
-
 *   `--role <single|master|worker>`: Node role (default: `single`).
-
     *   `single`: Runs the entire model locally.
-
     *   `master`: Runs the *first* part of the model and manages the prompt/generation loop.
-
     *   `worker`: Runs the *subsequent* parts of the model in a loop.
-
 *   `--split <int>`:
-
     *   **Master**: Layer index where the model is split (Master runs 0 to `split`-1).
-
     *   **Worker**: Layer index to start processing from.
-
 *   `--end <int>`: (Worker only) Layer index to stop processing at (exclusive). 0 = process until the last layer.
-
 *   `--transport <tcp|udp|kernel>`: Transport protocol (default: `tcp`).
-
 *   `--host <ip>`: Local interface to bind to (default: `0.0.0.0`).
-
 *   `--port <int>`: Local port to listen on (default: `9999`).
-
 *   `--next-host <ip>`: IP address of the *next* node in the ring (Required for distributed).
-
 *   `--next-port <int>`: Port of the *next* node in the ring (default: `9999`).
-
-
 
 #### Distributed Example (2 Nodes, split at layer 16)
 
 **Master Node (192.168.1.1):**
-
 ```bash
-
-./inference --model model.bin --role master --split 16 --next-host 192.168.1.2 --prompt "Once upon a time"
-
+./inference --role master --split 16 --next-host 192.168.1.2 --prompt "Once upon a time" model.bin
 ```
 
-
-
 **Worker Node (192.168.1.2):**
-
 ```bash
-
-./inference --model model.bin --role worker --split 16 --next-host 192.168.1.1
-
+./inference --role worker --split 16 --next-host 192.168.1.1 model.bin
 ```
 
 ## 8. Performance & Troubleshooting

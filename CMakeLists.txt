@@ -39,6 +39,27 @@ endif ()
 # 1. Dependency Setup
 # ------------------------------------------------------------------------------
 
+set(CMAKE_CXX_VISIBILITY_PRESET default)
+set(CMAKE_VISIBILITY_INLINES_HIDDEN OFF)
+
+# Initialize flags to ensure we don't inherit bad ones
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fexceptions -frtti -fvisibility=default")
+
+# --- LibTorch (Moved Up to Handle Flags Early) ---
+set(CMAKE_PREFIX_PATH "${CMAKE_SOURCE_DIR}/third-party/libtorch" ${CMAKE_PREFIX_PATH})
+find_package(Torch REQUIRED)
+
+foreach(FLAG_VAR CMAKE_CXX_FLAGS TORCH_CXX_FLAGS CMAKE_CXX_FLAGS_RELEASE)
+    if(${FLAG_VAR})
+        string(REPLACE "-fno-exceptions" "" ${FLAG_VAR} "${${FLAG_VAR}}")
+        string(REPLACE "-fno-rtti" "" ${FLAG_VAR} "${${FLAG_VAR}}")
+    endif()
+endforeach()
+
+# Force exceptions globally for all subsequent targets
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fexceptions -frtti -fvisibility=default")
+# =====================================================================
+
 # --- Json ---
 include(FetchContent)
 FetchContent_Declare(
@@ -63,28 +84,10 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(cli11)
 
-# --- LibTorch ---
-set(CMAKE_PREFIX_PATH "${CMAKE_SOURCE_DIR}/third-party/libtorch" ${CMAKE_PREFIX_PATH})
-find_package(Torch REQUIRED)
-
-if (CMAKE_CXX_FLAGS)
-    string(REPLACE "-fno-exceptions" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+# Ensure CLI11 propagates exception flags correctly
+if (TARGET CLI11)
+    target_compile_options(CLI11 INTERFACE -fexceptions)
 endif ()
-
-# Also clean the specific Torch variable if it exists
-if (TORCH_CXX_FLAGS)
-    string(REPLACE "-fno-exceptions" "" TORCH_CXX_FLAGS "${TORCH_CXX_FLAGS}")
-endif ()
-
-if (CMAKE_CXX_FLAGS_RELEASE)
-    string(REPLACE "-fno-exceptions" "" CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}")
-endif ()
-# ================
-
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fexceptions")
-
-# Force exceptions globally to be safe
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fexceptions")
 
 # --- Tokenizers ---
 add_subdirectory("${CMAKE_SOURCE_DIR}/third-party/tokenizers")
@@ -128,6 +131,7 @@ add_executable(export
         src/export/Utils.cpp
         src/export/Utils.h
 )
+set_source_files_properties(src/export/main.cpp PROPERTIES COMPILE_OPTIONS "-fexceptions;-frtti")
 
 target_include_directories(export PRIVATE third-party/tokenizers/third-party/json/single_include ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
@@ -181,7 +185,7 @@ add_executable(tokenizer
 # ------------------------------------------------------------------------------
 
 # --- Target: Export ---
-target_link_libraries(export PRIVATE ${TORCH_LIBRARIES} model nlohmann_json::nlohmann_json safetensors_cpp)
+target_link_libraries(export PRIVATE ${TORCH_LIBRARIES} model nlohmann_json::nlohmann_json safetensors_cpp CLI11::CLI11)
 
 # --- Target: Inference ---
 # Note: -ffast-math is already enabled globally above, but explicit options for headers are fine
@@ -193,8 +197,9 @@ target_include_directories(model PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/model)
 target_link_libraries(model PUBLIC ${TORCH_LIBRARIES})
 
 # --- Target: Tokenizer ---
-target_link_libraries(tokenizer PRIVATE ${TORCH_LIBRARIES} tokenizers)
+target_link_libraries(tokenizer PRIVATE ${TORCH_LIBRARIES} tokenizers CLI11::CLI11)
 
+# Redundant safety check to ensure targets have exceptions enabled
 target_compile_options(export PRIVATE -fexceptions)
 target_compile_options(model PRIVATE -fexceptions)
 target_compile_options(tokenizer PRIVATE -fexceptions)

@@ -1002,7 +1002,7 @@ namespace Inference {
         if (dist_config.mode == DistributedMode::Master) {
             if (!dist_config.transport) throw std::runtime_error("Transport not set for master");
 
-            const PacketHeader header{0x4C454150, PacketType::Inference, (uint32_t)pos, (uint32_t)flags, (uint32_t)(dim * sizeof(float))};
+            const PacketHeader header{0x4C454150, PacketType::Inference, (uint32_t)pos, 1, (uint32_t)flags, (uint32_t)(dim * sizeof(float))};
 
             // Optimization: Zero-Copy Send
             dist_config.transport->send_multipart_next(&header, sizeof(PacketHeader), x, dim * sizeof(float));

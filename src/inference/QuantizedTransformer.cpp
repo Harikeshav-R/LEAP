@@ -1152,4 +1152,9 @@ namespace Inference {
         }
         return node_stats;
     }
+
+    void QuantizedTransformer::clear_cache() {
+        std::fill(state.key_cache.begin(), state.key_cache.end(), 0.0f);
+        std::fill(state.value_cache.begin(), state.value_cache.end(), 0.0f);
+    }
 } // namespace Inference

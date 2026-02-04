@@ -70,7 +70,8 @@ namespace Inference {
             dist_config.split_layer = split;
             dist_config.end_layer = end;
             dist_config.is_tail = (end == config.n_layers);
-            std::cout << "[Config] Updated: Layers " << split << " -> " << end << std::endl;
+            clear_cache(); // CRITICAL: Reset memory for new layers
+            std::cout << "[Config] Updated: Layers " << split << " -> " << end << " (Cache Cleared)" << std::endl;
         }
 
         virtual void distribute_config(const std::vector<LayerConfig> &configs) {
@@ -80,6 +81,8 @@ namespace Inference {
         virtual std::vector<NodeStats> collect_stats() {
             return {};
         }
+
+        virtual void clear_cache() = 0;
 
         // Factory method to create the appropriate Transformer (Float or Quantized) based on file
         static std::unique_ptr<Transformer> create(const std::string &checkpoint_path);

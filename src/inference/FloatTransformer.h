@@ -51,6 +51,8 @@ namespace Inference {
 
         std::vector<NodeStats> collect_stats() override;
 
+        void clear_cache() override;
+
     private:
         FloatTransformerWeights weights{};
         FloatRunState state{};

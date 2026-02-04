@@ -954,7 +954,7 @@ namespace Inference {
 
                 for (size_t i = 0; i < recv_count - 1; i++) {
                     float diff = scores[i] - scores[i+1];
-                    const float threshold = 15.0f; 
+                    const float threshold = 25.0f; 
 
                     if (std::abs(diff) > threshold) {
                         if (diff > 0) {
@@ -982,6 +982,7 @@ namespace Inference {
                 if (changed) {
                     distribute_config(new_configs);
                     needs_rewind = true;
+                    return s->logits.data();
                 }
             }
         }

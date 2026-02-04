@@ -699,7 +699,7 @@ namespace Inference {
                 // Only move one boundary per cycle for stability
                 for (size_t i = 0; i < recv_count - 1; i++) {
                     float diff = scores[i] - scores[i+1];
-                    const float threshold = 15.0f; // 15% CPU difference required to trigger move
+                    const float threshold = 25.0f; // Increased to 25% to prevent oscillation
 
                     if (std::abs(diff) > threshold) {
                         // If Node i is hotter (diff > 0), give load to i+1 (decrease i's end layer)
@@ -730,6 +730,7 @@ namespace Inference {
                 if (changed) {
                     distribute_config(new_configs);
                     needs_rewind = true; // Signal main loop to rebuild cache
+                    return s->logits.data(); // Abort processing immediately
                 }
             }
         }

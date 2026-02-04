@@ -1044,14 +1044,20 @@ namespace Inference {
 
         while (true) {
             try {
+                // 1. Receive Header Only
                 dist_config.transport->recv_prev(transfer_buffer.data(), sizeof(PacketHeader));
                 std::memcpy(&header, transfer_buffer.data(), sizeof(PacketHeader));
 
-                if (header.magic != 0x4C454150) break;
+                if (header.magic != 0x4C454150) {
+                     std::cerr << "Error: Invalid Magic " << std::hex << header.magic << std::dec << std::endl;
+                     break;
+                }
 
+                // 2. Receive Payload (if any)
                 if (header.payload_size > 0) {
                      if (transfer_buffer.size() < sizeof(PacketHeader) + header.payload_size)
                          transfer_buffer.resize(sizeof(PacketHeader) + header.payload_size);
+                     
                      dist_config.transport->recv_prev(transfer_buffer.data() + sizeof(PacketHeader), header.payload_size);
                 }
 

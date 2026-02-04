@@ -781,6 +781,7 @@ namespace Inference {
         const int dim = config.dim;
         PacketHeader header{};
 
+        // Ensure buffer is large enough for max inference payload
         const size_t max_payload = dim * sizeof(float) > 1024 ? dim * sizeof(float) : 1024;
         if (transfer_buffer.size() < sizeof(PacketHeader) + max_payload) 
             transfer_buffer.resize(sizeof(PacketHeader) + max_payload);
@@ -790,18 +791,19 @@ namespace Inference {
 
         while (true) {
             try {
-                // Receive Header first
+                // 1. Receive Header Only
                 dist_config.transport->recv_prev(transfer_buffer.data(), sizeof(PacketHeader));
                 std::memcpy(&header, transfer_buffer.data(), sizeof(PacketHeader));
 
                 if (header.magic != 0x4C454150) {
                      std::cerr << "Error: Invalid Magic " << std::hex << header.magic << std::dec << std::endl;
-                     // Try to recover or just break
+                     // In a real system we might try to resync, here we break/crash safely
                      break;
                 }
 
-                // Receive Payload
+                // 2. Receive Payload (if any)
                 if (header.payload_size > 0) {
+                     // Resize if needed (e.g. large stats payload)
                      if (transfer_buffer.size() < sizeof(PacketHeader) + header.payload_size)
                          transfer_buffer.resize(sizeof(PacketHeader) + header.payload_size);
                      
@@ -842,7 +844,6 @@ namespace Inference {
                 }
                 else if (header.type == PacketType::ConfigUpdate) {
                     // Parse Config Update
-                    // Payload: [uint32_t current_idx] [LayerConfig...]
                     uint32_t current_idx;
                     std::memcpy(&current_idx, transfer_buffer.data() + sizeof(PacketHeader), sizeof(current_idx));
                     

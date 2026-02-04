@@ -139,6 +139,8 @@ add_executable(inference
         src/inference/Config.h
         src/inference/FloatTransformer.cpp
         src/inference/FloatTransformer.h
+        src/inference/SystemMonitor.cpp
+        src/inference/SystemMonitor.h
         src/inference/main.cpp
         src/inference/QuantizedTransformer.cpp
         src/inference/QuantizedTransformer.h

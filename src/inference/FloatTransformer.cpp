@@ -808,10 +808,13 @@ namespace Inference {
         if (dist_config.mode == DistributedMode::Master) {
             if (!dist_config.transport) throw std::runtime_error("Transport not set for master");
 
-            // Use FLAG_NEED_REPLY to ensure all workers finish processing the batch (cache update)
-            // before we proceed to new tokens. This prevents race conditions.
+            // We use FLAG_NO_REPLY because we don't need the result back for history
             PacketHeader header{0x4C454150, PacketType::Inference, (uint32_t)start_pos, (uint32_t)n_tokens, FLAG_NEED_REPLY};
             header.payload_size = n_tokens * dim * sizeof(float);
+
+            float sum = 0.0f;
+            for(float f : batch_x) sum += f;
+            std::cout << "[Debug Master] Batch Checksum: " << sum << std::endl;
 
             dist_config.transport->send_multipart_next(&header, sizeof(PacketHeader), batch_x.data(), header.payload_size);
 
@@ -865,6 +868,10 @@ namespace Inference {
                     
                     // Buffer already contains data at offset
                     float *data_ptr = reinterpret_cast<float*>(transfer_buffer.data() + sizeof(PacketHeader));
+
+                    float sum = 0.0f;
+                    for(size_t k=0; k < n_tokens * dim; k++) sum += data_ptr[k];
+                    std::cout << "[Debug Worker] Batch Checksum: " << sum << std::endl;
 
                     // Process layers for each token in batch
                     // std::cout << "[Debug] Batch N=" << n_tokens << " Layers=" << dist_config.split_layer << "-" << dist_config.end_layer << std::endl;

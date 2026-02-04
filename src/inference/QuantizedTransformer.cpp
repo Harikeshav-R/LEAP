@@ -1057,6 +1057,10 @@ namespace Inference {
             PacketHeader header{0x4C454150, PacketType::Inference, (uint32_t)start_pos, (uint32_t)n_tokens, FLAG_NEED_REPLY};
             header.payload_size = n_tokens * dim * sizeof(float);
             
+            float sum = 0.0f;
+            for(float f : batch_x) sum += f;
+            std::cout << "[Debug Master] Batch Checksum: " << sum << std::endl;
+
             dist_config.transport->send_multipart_next(&header, sizeof(PacketHeader), batch_x.data(), header.payload_size);
             
             if (transfer_buffer.size() < sizeof(PacketHeader) + header.payload_size)
@@ -1103,6 +1107,10 @@ namespace Inference {
                     size_t n_tokens = header.n_tokens > 0 ? header.n_tokens : 1;
                     size_t data_size = n_tokens * dim * sizeof(float);
                     float *data_ptr = reinterpret_cast<float*>(transfer_buffer.data() + sizeof(PacketHeader));
+
+                    float sum = 0.0f;
+                    for(size_t k=0; k < n_tokens * dim; k++) sum += data_ptr[k];
+                    std::cout << "[Debug Worker] Batch Checksum: " << sum << std::endl;
 
                     for (size_t i = 0; i < n_tokens; i++) {
                         float *token_data = data_ptr + i * dim;

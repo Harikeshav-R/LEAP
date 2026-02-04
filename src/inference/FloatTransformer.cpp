@@ -729,6 +729,7 @@ namespace Inference {
 
                 if (changed) {
                     distribute_config(new_configs);
+                    needs_rewind = true; // Signal main loop to rebuild cache
                 }
             }
         }

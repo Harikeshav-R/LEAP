@@ -208,6 +208,18 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, cons
         const int flags = (user_idx < static_cast<int>(prompt_tokens.size())) ? FLAG_NO_REPLY : FLAG_NEED_REPLY;
         float *logits = transformer->forward(token, pos, flags);
 
+        // --- AUTOMATIC REWIND CHECK ---
+        if (transformer->needs_rewind) {
+            transformer->needs_rewind = false;
+            std::cout << "\n[System] Automatic load balance: Re-evaluating context..." << std::endl;
+            prompt_tokens = history_tokens;
+            pos = 0;
+            user_idx = 0;
+            recomputing = true;
+            user_turn = false;
+            continue;
+        }
+
         if (flags == FLAG_NO_REPLY) {
             next = (user_idx < static_cast<int>(prompt_tokens.size())) ? prompt_tokens[user_idx] : 0;
         } else {

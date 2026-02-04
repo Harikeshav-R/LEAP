@@ -53,6 +53,7 @@ namespace Inference {
         Config config{};
         DistributedConfig dist_config{};
         SystemMonitor monitor{};
+        bool needs_rewind = false; // Flag for automatic re-evaluation
 
         virtual ~Transformer() = default;
 

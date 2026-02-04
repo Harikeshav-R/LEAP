@@ -69,6 +69,10 @@ namespace Inference {
 
         void worker_loop() override;
 
+        void distribute_config(const std::vector<LayerConfig> &configs) override;
+
+        std::vector<NodeStats> collect_stats() override;
+
     private:
         QuantizedTransformerWeights weights{};
         QuantizedRunState state{};

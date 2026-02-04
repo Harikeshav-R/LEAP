@@ -672,7 +672,69 @@ namespace Inference {
         const float *content_row = w->token_embedding_table + token * dim;
         std::copy_n(content_row, dim, x);
 
-        constexpr int start_layer = 0;
+        // --- Load Balancing Trigger (Master Only) ---
+        if (dist_config.mode == DistributedMode::Master && pos % 50 == 0 && pos > 0) {
+            std::vector<NodeStats> node_stats = collect_stats();
+            size_t recv_count = node_stats.size();
+            
+            if (recv_count > 1) { // Need at least 2 nodes to balance
+                // Smart Algorithm
+                // 1. Calculate Scores: Score = CPU% + ThermalPenalty
+                std::vector<float> scores(recv_count);
+                for (size_t i = 0; i < recv_count; i++) {
+                    float s = node_stats[i].cpu_usage;
+                    if (node_stats[i].temperature > 80.0f) s += 20.0f; // Thermal Penalty
+                    scores[i] = s;
+                }
+
+                // 2. Find Imbalance at Boundaries
+                // We check boundary 'i' which is between Node i and Node i+1
+                // Node i handles [split, end), Node i+1 handles [end, next_end)
+                // We can shift 'end' of Node i.
+                
+                bool changed = false;
+                std::vector<LayerConfig> new_configs(recv_count);
+                for(size_t i=0; i<recv_count; i++) new_configs[i] = {node_stats[i].split_layer, node_stats[i].end_layer};
+
+                // Only move one boundary per cycle for stability
+                for (size_t i = 0; i < recv_count - 1; i++) {
+                    float diff = scores[i] - scores[i+1];
+                    const float threshold = 15.0f; // 15% CPU difference required to trigger move
+
+                    if (std::abs(diff) > threshold) {
+                        // If Node i is hotter (diff > 0), give load to i+1 (decrease i's end layer)
+                        if (diff > 0) {
+                            int layers_i = new_configs[i].end_layer - new_configs[i].split_layer;
+                            if (layers_i > 1) { // Don't starve node
+                                new_configs[i].end_layer--;
+                                new_configs[i+1].split_layer--;
+                                changed = true;
+                                std::cout << "[LB] Imbalance detected (Node " << i << " > Node " << i+1 << "). Shifting 1 layer >>" << std::endl;
+                                break; 
+                            }
+                        } 
+                        // If Node i+1 is hotter (diff < 0), take load from i+1 (increase i's end layer)
+                        else {
+                            int layers_next = new_configs[i+1].end_layer - new_configs[i+1].split_layer;
+                            if (layers_next > 1) {
+                                new_configs[i].end_layer++;
+                                new_configs[i+1].split_layer++;
+                                changed = true;
+                                std::cout << "[LB] Imbalance detected (Node " << i+1 << " > Node " << i << "). Shifting 1 layer <<" << std::endl;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if (changed) {
+                    distribute_config(new_configs);
+                }
+            }
+        }
+        // ---------------------------------------------
+
+        int start_layer = 0;
         int end_layer = p->n_layers;
 
         if (dist_config.mode == DistributedMode::Master) {
@@ -686,7 +748,7 @@ namespace Inference {
         if (dist_config.mode == DistributedMode::Master) {
             if (!dist_config.transport) throw std::runtime_error("Transport not set for master");
 
-            const PacketHeader header{pos, flags};
+            const PacketHeader header{0x4C454150, PacketType::Inference, (uint32_t)pos, (uint32_t)flags, (uint32_t)(dim * sizeof(float))};
 
             // Optimization: Zero-Copy Send
             dist_config.transport->send_multipart_next(&header, sizeof(PacketHeader), x, dim * sizeof(float));
@@ -717,34 +779,85 @@ namespace Inference {
         const int dim = config.dim;
         PacketHeader header{};
 
-        const int start_layer = dist_config.split_layer;
+        const size_t max_payload = dim * sizeof(float) > 1024 ? dim * sizeof(float) : 1024;
+        if (transfer_buffer.size() < sizeof(PacketHeader) + max_payload) 
+            transfer_buffer.resize(sizeof(PacketHeader) + max_payload);
 
-        const size_t packet_size = sizeof(PacketHeader) + dim * sizeof(float);
-        if (transfer_buffer.size() < packet_size) transfer_buffer.resize(packet_size);
-
-        std::cout << "Worker started. Processing layers " << start_layer << " to " << dist_config.end_layer - 1 <<
+        std::cout << "Worker started. Processing layers " << dist_config.split_layer << " to " << dist_config.end_layer - 1 <<
                 std::endl;
 
         while (true) {
             try {
-                // Receive header + data from Prev
-                dist_config.transport->recv_prev(transfer_buffer.data(), packet_size);
-
+                // Receive Header first
+                dist_config.transport->recv_prev(transfer_buffer.data(), sizeof(PacketHeader));
                 std::memcpy(&header, transfer_buffer.data(), sizeof(PacketHeader));
-                std::memcpy(x, transfer_buffer.data() + sizeof(PacketHeader), dim * sizeof(float));
 
-                // Process layers
-                for (int l = start_layer; l < dist_config.end_layer; l++) {
-                    run_layer(l, header.pos, x);
+                if (header.magic != 0x4C454150) {
+                     std::cerr << "Error: Invalid Magic " << std::hex << header.magic << std::dec << std::endl;
+                     // Try to recover or just break
+                     break;
                 }
 
-                // If Tail and NO_REPLY, Drop the packet (End of Pipeline)
-                // If Not Tail, Forward to Next
-                // If Tail and NEED_REPLY, Forward to Next (Master)
-
-                if (!dist_config.is_tail || header.flags == FLAG_NEED_REPLY) {
-                    dist_config.transport->send_multipart_next(&header, sizeof(PacketHeader), x, dim * sizeof(float));
+                // Receive Payload
+                if (header.payload_size > 0) {
+                     if (transfer_buffer.size() < sizeof(PacketHeader) + header.payload_size)
+                         transfer_buffer.resize(sizeof(PacketHeader) + header.payload_size);
+                     
+                     dist_config.transport->recv_prev(transfer_buffer.data() + sizeof(PacketHeader), header.payload_size);
                 }
+
+                if (header.type == PacketType::Inference) {
+                    std::memcpy(x, transfer_buffer.data() + sizeof(PacketHeader), dim * sizeof(float));
+
+                    // Process layers
+                    for (int l = dist_config.split_layer; l < dist_config.end_layer; l++) {
+                        run_layer(l, header.pos, x);
+                    }
+
+                    if (!dist_config.is_tail || header.flags == FLAG_NEED_REPLY) {
+                        dist_config.transport->send_multipart_next(&header, sizeof(PacketHeader), x, dim * sizeof(float));
+                    }
+                } 
+                else if (header.type == PacketType::StatsUpdate) {
+                    // Append my stats
+                    uint32_t count;
+                    std::memcpy(&count, transfer_buffer.data() + sizeof(PacketHeader), sizeof(count));
+                    
+                    NodeStats my_stats = monitor.get_stats();
+                    my_stats.split_layer = dist_config.split_layer;
+                    my_stats.end_layer = dist_config.end_layer;
+
+                    size_t offset = sizeof(uint32_t) + count * sizeof(NodeStats);
+                    
+                    if (offset + sizeof(NodeStats) <= header.payload_size) {
+                        std::memcpy(transfer_buffer.data() + sizeof(PacketHeader) + offset, &my_stats, sizeof(NodeStats));
+                        count++;
+                        std::memcpy(transfer_buffer.data() + sizeof(PacketHeader), &count, sizeof(count));
+                    }
+                    
+                    // Forward to next (always return to master)
+                    dist_config.transport->send_next(transfer_buffer.data(), sizeof(PacketHeader) + header.payload_size);
+                }
+                else if (header.type == PacketType::ConfigUpdate) {
+                    // Parse Config Update
+                    // Payload: [uint32_t current_idx] [LayerConfig...]
+                    uint32_t current_idx;
+                    std::memcpy(&current_idx, transfer_buffer.data() + sizeof(PacketHeader), sizeof(current_idx));
+                    
+                    LayerConfig *configs = reinterpret_cast<LayerConfig*>(transfer_buffer.data() + sizeof(PacketHeader) + sizeof(uint32_t));
+                    
+                    // Update my config
+                    LayerConfig my_cfg = configs[current_idx];
+                    update_config(my_cfg.split_layer, my_cfg.end_layer);
+                    
+                    // Increment index for next node
+                    current_idx++;
+                    std::memcpy(transfer_buffer.data() + sizeof(PacketHeader), &current_idx, sizeof(current_idx));
+                    
+                    // Forward
+                    dist_config.transport->send_next(transfer_buffer.data(), sizeof(PacketHeader) + header.payload_size);
+                }
+
             } catch (const std::exception &e) {
                 std::cerr << "Worker loop error: " << e.what() << std::endl;
                 break;
@@ -783,5 +896,73 @@ namespace Inference {
         } else {
             weights.wcls = ptr;
         }
+    }
+
+    void FloatTransformer::distribute_config(const std::vector<LayerConfig> &configs) {
+        if (dist_config.mode != DistributedMode::Master) return;
+        if (configs.empty()) return;
+
+        PacketHeader req{};
+        req.magic = 0x4C454150;
+        req.type = PacketType::ConfigUpdate;
+        req.payload_size = sizeof(uint32_t) + configs.size() * sizeof(LayerConfig);
+        req.pos = 0;
+        req.flags = FLAG_NEED_REPLY;
+
+        std::vector<char> buf(req.payload_size);
+        
+        // Master (Node 0) updates itself immediately
+        update_config(configs[0].split_layer, configs[0].end_layer);
+
+        // Packet is for Node 1 onwards
+        uint32_t start_idx = 1;
+        std::memcpy(buf.data(), &start_idx, sizeof(start_idx));
+        std::memcpy(buf.data() + sizeof(start_idx), configs.data(), configs.size() * sizeof(LayerConfig));
+
+        dist_config.transport->send_multipart_next(&req, sizeof(PacketHeader), buf.data(), buf.size());
+
+        // Wait for return (Ring)
+        if (transfer_buffer.size() < sizeof(PacketHeader) + req.payload_size)
+            transfer_buffer.resize(sizeof(PacketHeader) + req.payload_size);
+            
+        dist_config.transport->recv_prev(transfer_buffer.data(), sizeof(PacketHeader) + req.payload_size);
+
+        std::cout << "[Master] Configuration distributed to cluster." << std::endl;
+    }
+
+    std::vector<NodeStats> FloatTransformer::collect_stats() {
+        if (dist_config.mode != DistributedMode::Master) return {};
+
+        PacketHeader req{};
+        req.magic = 0x4C454150;
+        req.type = PacketType::StatsUpdate;
+        req.payload_size = sizeof(uint32_t) + 32 * sizeof(NodeStats); // Pre-allocate
+        req.pos = 0;
+        req.flags = FLAG_NEED_REPLY;
+
+        std::vector<char> stats_buf(req.payload_size);
+        uint32_t count = 1;
+        NodeStats my_stats = monitor.get_stats();
+        my_stats.split_layer = dist_config.split_layer;
+        my_stats.end_layer = dist_config.end_layer;
+        
+        std::memcpy(stats_buf.data(), &count, sizeof(count));
+        std::memcpy(stats_buf.data() + sizeof(count), &my_stats, sizeof(NodeStats));
+
+        dist_config.transport->send_multipart_next(&req, sizeof(PacketHeader), stats_buf.data(), stats_buf.size());
+
+        if (transfer_buffer.size() < sizeof(PacketHeader) + req.payload_size)
+            transfer_buffer.resize(sizeof(PacketHeader) + req.payload_size);
+            
+        dist_config.transport->recv_prev(transfer_buffer.data(), sizeof(PacketHeader) + req.payload_size);
+        
+        uint32_t recv_count;
+        std::memcpy(&recv_count, transfer_buffer.data() + sizeof(PacketHeader), sizeof(recv_count));
+        
+        std::vector<NodeStats> node_stats(recv_count);
+        if (recv_count > 0) {
+            std::memcpy(node_stats.data(), transfer_buffer.data() + sizeof(PacketHeader) + sizeof(uint32_t), recv_count * sizeof(NodeStats));
+        }
+        return node_stats;
     }
 } // namespace Inference

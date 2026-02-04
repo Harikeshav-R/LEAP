@@ -111,6 +111,55 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, cons
             } else {
                 read_stdin("User (or exit): ", user_prompt_str);
                 if (user_prompt_str == "exit") break;
+                
+                if (user_prompt_str.rfind("/layer", 0) == 0) {
+                    std::istringstream iss(user_prompt_str);
+                    std::string cmd;
+                    iss >> cmd; 
+                    std::vector<int> splits;
+                    int val;
+                    while (iss >> val) {
+                        splits.push_back(val);
+                    }
+                    
+                    if (splits.empty()) {
+                        std::cout << "Usage: /layer <end_layer_node0> <end_layer_node1> ... (e.g., /layer 16 32)" << std::endl;
+                    } else {
+                        std::vector<LayerConfig> configs;
+                        int start = 0;
+                        for (int end : splits) {
+                            configs.push_back({start, end});
+                            start = end;
+                        }
+                        transformer->distribute_config(configs);
+                    }
+                    // Skip inference for this turn, reset loop to prompt again?
+                    // The loop continues, but "user_turn" logic is tricky. 
+                    // We need to NOT add this to prompt_tokens.
+                    // Resetting state:
+                    prompt_tokens.clear(); // Clear the partial prompt building
+                    user_turn = true; // Stay in user turn
+                    pos = 0; // Reset pos if we want to restart? 
+                    // Actually, if we are in chat loop, 'pos' tracks total tokens generated. 
+                    // If we just continue, it will try to encode "/layer..." as prompt.
+                    // We need to bypass the rest of the loop.
+                    continue; 
+                } else if (user_prompt_str == "/stats") {
+                     std::vector<NodeStats> stats = transformer->collect_stats();
+                     std::cout << "\n--- Cluster Statistics ---\n";
+                     std::cout << "Node | CPU(%) | RAM(%) | Temp(C) | Layers\n";
+                     std::cout << "-----|--------|--------|---------|-------\n";
+                     for (size_t i = 0; i < stats.size(); i++) {
+                         std::printf("  %zu  |  %5.1f |  %5.1f |  %5.1f  | %d-%d\n", 
+                                     i, stats[i].cpu_usage, stats[i].ram_usage, stats[i].temperature,
+                                     stats[i].split_layer, stats[i].end_layer);
+                     }
+                     std::cout << "--------------------------\n\n";
+                     
+                     prompt_tokens.clear();
+                     user_turn = true;
+                     continue;
+                }
             }
 
             std::vector<int> usr_tokens;

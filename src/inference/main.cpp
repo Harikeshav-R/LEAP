@@ -138,15 +138,24 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, cons
                             }
                             transformer->distribute_config(configs);
                             
-                            // --- REWIND LOGIC ---
+                            // --- REWIND LOGIC (BATCHED) ---
                             std::cout << "[System] Re-evaluating context (" << history_tokens.size() << " tokens)..." << std::endl;
-                            prompt_tokens = history_tokens; // Load full history as prompt
-                            pos = 0;
-                            user_idx = 0;
-                            recomputing = true;
-                            user_turn = false; // Bypass user input logic, go straight to processing
+                            if (!history_tokens.empty()) {
+                                transformer->forward_batch(history_tokens, 0);
+                            }
+                            
+                            // Reset state for continuation
+                            prompt_tokens = history_tokens; 
+                            pos = history_tokens.size(); // Set pos to end of history
+                            user_idx = prompt_tokens.size(); // Skip user input processing
+                            
+                            // We are done recomputing in one shot.
+                            // Resume generation immediately.
+                            recomputing = false; 
+                            user_turn = false; // Bypass user input
+                            
                             command_handled = true;
-                            break; // Break inner input loop to start processing
+                            break; 
                         }
                         continue; 
                     } else if (user_prompt_str == "/stats") {
@@ -197,48 +206,30 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, cons
         }
 
         // Check if we are done recomputing
-        bool finishing_recompute = false;
-        if (recomputing && user_idx >= static_cast<int>(prompt_tokens.size())) {
-            recomputing = false;
-            finishing_recompute = true;
-        }
+        // Legacy recomputing logic removed as forward_batch handles it instantly.
 
         if (user_idx >= static_cast<int>(prompt_tokens.size()) && (token == 128009 || token == 128001)) {
-            if (!recomputing && !finishing_recompute) {
-                user_turn = true;
-            } else if (finishing_recompute) {
-                // We just finished replaying history and the last token was EOT.
-                // We should NOT generate a new token (next).
-                // We should just switch to user turn.
-                user_turn = true;
-                // Skip the rest of the loop (sampling/printing)
-                continue;
-            }
+            user_turn = true;
         }
 
         const int flags = (user_idx < static_cast<int>(prompt_tokens.size())) ? FLAG_NO_REPLY : FLAG_NEED_REPLY;
-        
-        // Force synchronization during recompute to ensure perfect cache rebuilding
-        int effective_flags = flags;
-        if (recomputing) {
-            effective_flags = FLAG_NEED_REPLY;
-        }
-
-        float *logits = transformer->forward(token, pos, effective_flags);
+        float *logits = transformer->forward(token, pos, flags);
 
         // --- AUTOMATIC REWIND CHECK ---
         if (transformer->needs_rewind) {
             transformer->needs_rewind = false;
             std::cout << "\n[System] Automatic load balance: Re-evaluating context..." << std::endl;
-            // Pop the last token because it was processed on the OLD config and triggered the rewind.
-            // We want to re-process it on the NEW config.
-            if (!history_tokens.empty()) history_tokens.pop_back(); 
+            if (!history_tokens.empty()) {
+                history_tokens.pop_back(); 
+                transformer->forward_batch(history_tokens, 0);
+            }
             
             prompt_tokens = history_tokens;
-            pos = 0;
-            user_idx = 0;
-            recomputing = true;
-            user_turn = false;
+            pos = history_tokens.size();
+            user_idx = prompt_tokens.size();
+            
+            recomputing = false; // Done instantly
+            user_turn = false; // Continue generating
             continue;
         }
 
@@ -252,11 +243,11 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, cons
 
         if (user_idx >= static_cast<int>(prompt_tokens.size()) && (next == 128009 || next == 128001)) {
             std::cout << std::endl;
-            if (!recomputing && !finishing_recompute) history_tokens.push_back(next); 
+            if (!recomputing) history_tokens.push_back(next); 
         }
         
         if (user_idx >= static_cast<int>(prompt_tokens.size()) && next != 128009 && next != 128001 && next != 128006) {
-            if (!recomputing && !finishing_recompute) {
+            if (!recomputing) {
                 const std::string &piece = tokenizer->decode(token, next);
                 Utils::safe_print(piece);
                 std::cout.flush();

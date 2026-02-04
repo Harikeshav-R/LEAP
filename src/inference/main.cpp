@@ -197,15 +197,22 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, cons
         }
 
         // Check if we are done recomputing
+        bool finishing_recompute = false;
         if (recomputing && user_idx >= static_cast<int>(prompt_tokens.size())) {
             recomputing = false;
-            // Do NOT set user_turn = true; we might be in the middle of assistant generation
-            // prompt_tokens is now exhausted, so the loop will naturally fall through to sampling 'next'
+            finishing_recompute = true;
         }
 
         if (user_idx >= static_cast<int>(prompt_tokens.size()) && (token == 128009 || token == 128001)) {
-            if (!recomputing) {
+            if (!recomputing && !finishing_recompute) {
                 user_turn = true;
+            } else if (finishing_recompute) {
+                // We just finished replaying history and the last token was EOT.
+                // We should NOT generate a new token (next).
+                // We should just switch to user turn.
+                user_turn = true;
+                // Skip the rest of the loop (sampling/printing)
+                continue;
             }
         }
 
@@ -238,15 +245,15 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, cons
 
         if (user_idx >= static_cast<int>(prompt_tokens.size()) && (next == 128009 || next == 128001)) {
             std::cout << std::endl;
-            if (!recomputing) history_tokens.push_back(next); // Store EOT
+            if (!recomputing && !finishing_recompute) history_tokens.push_back(next); 
         }
         
         if (user_idx >= static_cast<int>(prompt_tokens.size()) && next != 128009 && next != 128001 && next != 128006) {
-            if (!recomputing) {
+            if (!recomputing && !finishing_recompute) {
                 const std::string &piece = tokenizer->decode(token, next);
                 Utils::safe_print(piece);
                 std::cout.flush();
-                // history_tokens.push_back(next); // REMOVED: Next iteration will push this as 'token'
+                history_tokens.push_back(next); 
             }
         }
     }

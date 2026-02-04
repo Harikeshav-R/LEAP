@@ -16,7 +16,7 @@ namespace Tokenizer {
 
         [[nodiscard]] std::string decode(const std::vector<int> &tokens) const;
 
-        void export_tokenized_binary_file() const;
+        void export_tokenized_binary_file(const std::string& output_path_arg = "") const;
 
         [[nodiscard]] int32_t bos_id() const { return static_cast<int32_t>(bos_id_); }
         [[nodiscard]] int32_t eos_id() const { return static_cast<int32_t>(eos_id_); }

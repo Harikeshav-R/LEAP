@@ -67,6 +67,8 @@ namespace Inference {
 
         float *forward(int token, int pos, int flags = FLAG_NEED_REPLY) override;
 
+        void forward_batch(const std::vector<int> &tokens, int start_pos) override;
+
         void worker_loop() override;
 
         void distribute_config(const std::vector<LayerConfig> &configs) override;

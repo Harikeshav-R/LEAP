@@ -33,10 +33,11 @@ namespace Inference {
     struct PacketHeader {
         uint32_t magic;      // 0x4C454150
         PacketType type;     // Message Type
-        uint32_t pos;        // Token Position
+        uint32_t pos;        // Token Position (Start Pos for batch)
+        uint32_t n_tokens;   // Number of tokens in this batch
         uint32_t flags;      // Flags
         uint32_t payload_size;
-        uint32_t reserved[3]; // Padding to 32 bytes
+        uint32_t reserved[2]; // Padding to 32 bytes
     };
 
     constexpr int FLAG_NO_REPLY = 0;
@@ -59,6 +60,9 @@ namespace Inference {
 
         // The core function: forward pass
         virtual float *forward(int token, int pos, int flags = FLAG_NEED_REPLY) = 0;
+
+        // Batch forward pass for context rewind
+        virtual void forward_batch(const std::vector<int> &tokens, int start_pos) = 0;
 
         // Worker loop: receive tensor, process layers, send back
         virtual void worker_loop() = 0;

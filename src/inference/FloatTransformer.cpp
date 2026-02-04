@@ -774,6 +774,48 @@ namespace Inference {
         return s->logits.data();
     }
 
+    void FloatTransformer::forward_batch(const std::vector<int> &tokens, int start_pos) {
+        const Config *p = &config;
+        const FloatTransformerWeights *w = &weights;
+        const int dim = p->dim;
+        size_t n_tokens = tokens.size();
+
+        // 1. Process Local Layers for all tokens
+        // To save memory, we can reuse 'state.x' but we need a buffer for the outputs to send.
+        // If we are Master, we are Head. We generate 'x' from embeddings.
+        
+        std::vector<float> batch_x(n_tokens * dim); // Buffer for all tokens
+
+        int start_layer = 0;
+        int end_layer = p->n_layers;
+        if (dist_config.mode == DistributedMode::Master) {
+            end_layer = dist_config.split_layer;
+        }
+
+        for (size_t i = 0; i < n_tokens; i++) {
+            float *x_ptr = batch_x.data() + i * dim;
+            // Load Embedding
+            const float *content_row = w->token_embedding_table + tokens[i] * dim;
+            std::copy_n(content_row, dim, x_ptr);
+            
+            // Run Layers
+            for (int l = start_layer; l < end_layer; l++) {
+                run_layer(l, start_pos + i, x_ptr);
+            }
+        }
+
+        // 2. Send to Next Node
+        if (dist_config.mode == DistributedMode::Master) {
+            if (!dist_config.transport) throw std::runtime_error("Transport not set for master");
+
+            // We use FLAG_NO_REPLY because we don't need the result back for history
+            PacketHeader header{0x4C454150, PacketType::Inference, (uint32_t)start_pos, (uint32_t)n_tokens, FLAG_NO_REPLY};
+            header.payload_size = n_tokens * dim * sizeof(float);
+
+            dist_config.transport->send_multipart_next(&header, sizeof(PacketHeader), batch_x.data(), header.payload_size);
+        }
+    }
+
     void FloatTransformer::worker_loop() {
         if (!dist_config.transport) throw std::runtime_error("Transport not set for worker");
 
@@ -811,15 +853,22 @@ namespace Inference {
                 }
 
                 if (header.type == PacketType::Inference) {
-                    std::memcpy(x, transfer_buffer.data() + sizeof(PacketHeader), dim * sizeof(float));
+                    size_t n_tokens = header.n_tokens > 0 ? header.n_tokens : 1;
+                    size_t data_size = n_tokens * dim * sizeof(float);
+                    
+                    // Buffer already contains data at offset
+                    float *data_ptr = reinterpret_cast<float*>(transfer_buffer.data() + sizeof(PacketHeader));
 
-                    // Process layers
-                    for (int l = dist_config.split_layer; l < dist_config.end_layer; l++) {
-                        run_layer(l, header.pos, x);
+                    // Process layers for each token in batch
+                    for (size_t i = 0; i < n_tokens; i++) {
+                        float *token_data = data_ptr + i * dim;
+                        for (int l = dist_config.split_layer; l < dist_config.end_layer; l++) {
+                            run_layer(l, header.pos + i, token_data);
+                        }
                     }
 
                     if (!dist_config.is_tail || header.flags == FLAG_NEED_REPLY) {
-                        dist_config.transport->send_multipart_next(&header, sizeof(PacketHeader), x, dim * sizeof(float));
+                        dist_config.transport->send_multipart_next(&header, sizeof(PacketHeader), data_ptr, data_size);
                     }
                 } 
                 else if (header.type == PacketType::StatsUpdate) {

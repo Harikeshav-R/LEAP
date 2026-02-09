@@ -413,6 +413,12 @@ int main(int argc, char *argv[]) {
         dist_config.is_tail = (end == transformer->config.n_layers);
 
         transformer->set_distributed_config(dist_config);
+        
+        // Set packet size on transport for properly padded control messages
+        if (transport) {
+            size_t packet_size = sizeof(PacketHeader) + transformer->config.dim * sizeof(float);
+            transport->set_packet_size(packet_size);
+        }
 
         if (dist_role == DistributedMode::Worker) {
             transformer->worker_loop();

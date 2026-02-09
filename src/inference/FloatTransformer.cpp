@@ -721,6 +721,9 @@ namespace Inference {
 
         const size_t packet_size = sizeof(PacketHeader) + dim * sizeof(float);
         if (transfer_buffer.size() < packet_size) transfer_buffer.resize(packet_size);
+        
+        // Set packet size on transport for properly padded control messages
+        dist_config.transport->set_packet_size(packet_size);
 
         std::cout << "Worker started. Processing layers " << start_layer << " to " << dist_config.end_layer - 1 <<
                 std::endl;

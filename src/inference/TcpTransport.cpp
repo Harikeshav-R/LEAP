@@ -184,10 +184,15 @@ namespace Inference {
     void TcpTransport::send_control(const ControlMessage &msg) {
         if (egress_fd == -1) throw std::runtime_error("No next node connected for control");
         ControlPacketHeader pkt{CONTROL_MAGIC, msg};
+        
+        // Use packet_size_ padding if set, otherwise send raw (for compat)
+        size_t send_size = (packet_size_ > 0 && packet_size_ >= sizeof(pkt)) ? packet_size_ : sizeof(pkt);
+        std::vector<char> buffer(send_size, 0);
+        std::memcpy(buffer.data(), &pkt, sizeof(pkt));
+        
         size_t total_sent = 0;
-        const auto *bytes = reinterpret_cast<const char *>(&pkt);
-        while (total_sent < sizeof(pkt)) {
-            const ssize_t sent = ::send(egress_fd, bytes + total_sent, sizeof(pkt) - total_sent, 0);
+        while (total_sent < send_size) {
+            const ssize_t sent = ::send(egress_fd, buffer.data() + total_sent, send_size - total_sent, 0);
             if (sent < 0) throw std::runtime_error("Send control failed");
             total_sent += sent;
         }

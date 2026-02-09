@@ -167,9 +167,16 @@ namespace Inference {
         if (next_ip.empty()) throw std::runtime_error("Next IP not configured for KernelTransport control");
 
         // For kernel transport, control messages use the same mechanism as regular data
-        // but are small enough to fit in a single packet
+        // Pad to packet_size_ for consistent recv_prev handling
         ControlPacketHeader pkt{CONTROL_MAGIC, msg};
-        send_next(&pkt, sizeof(pkt));
+        
+        if (packet_size_ > 0 && packet_size_ >= sizeof(pkt)) {
+            std::vector<char> buffer(packet_size_, 0);
+            std::memcpy(buffer.data(), &pkt, sizeof(pkt));
+            send_next(buffer.data(), buffer.size());
+        } else {
+            send_next(&pkt, sizeof(pkt));
+        }
     }
 
     bool KernelTransport::recv_control_nonblocking(ControlMessage &msg) {

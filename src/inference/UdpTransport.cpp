@@ -234,7 +234,12 @@ namespace Inference {
 
         ControlPacketHeader pkt{CONTROL_MAGIC, msg};
         
-        if (sendto(sockfd, &pkt, sizeof(pkt), 0,
+        // Use packet_size_ padding if set for consistency
+        size_t send_size = (packet_size_ > 0 && packet_size_ >= sizeof(pkt)) ? packet_size_ : sizeof(pkt);
+        std::vector<char> buffer(send_size, 0);
+        std::memcpy(buffer.data(), &pkt, sizeof(pkt));
+        
+        if (sendto(sockfd, buffer.data(), send_size, 0,
                    reinterpret_cast<const struct sockaddr *>(&next_addr), sizeof(next_addr)) < 0) {
             throw std::runtime_error("UDP send control failed");
         }

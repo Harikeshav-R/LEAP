@@ -61,24 +61,28 @@ namespace Inference {
         // Clear KV cache (needed after layer redistribution to avoid stale state)
         virtual void clear_kv_cache() = 0;
 
-        // KV Cache Transfer: Master initiates the ring transfer after resize
-        // Sends departing layer KV data forward, then receives returning layers from tail
+        // KV Cache Transfer: Two-Phase Protocol
+        // Phase 1: Header (padded to packet_size) — detected inline in worker_loop
+        // Phase 2: Payload (contiguous: [layer_id + key + value] per slice)
+        // This ensures compatibility with all transports (TCP, UDP, Kernel).
+
+        // Master initiates the ring transfer after resize
         void initiate_kv_transfer(float *key_cache, float *value_cache,
                                   int pos, int kv_dim, int seq_len,
                                   int old_split, int new_split) {
             if (!dist_config.transport || pos <= 0) return;
 
-            const size_t slice_data_size = static_cast<size_t>(pos) * kv_dim * sizeof(float);
+            const size_t slice_bytes = static_cast<size_t>(pos) * kv_dim * sizeof(float);
+            const size_t per_slice_size = sizeof(int32_t) + slice_bytes * 2;
             const size_t packet_size = dist_config.transport->get_packet_size();
 
-            // Build bundle: layers master is giving up (old range that's no longer ours)
-            // Master owns [0, split_layer). Old: [0, old_split), New: [0, new_split)
+            // Layers master is giving up: [new_split, old_split)
             std::vector<int32_t> departing_layers;
             for (int l = new_split; l < old_split; l++) {
-                departing_layers.push_back(l);  // Master lost these layers
+                departing_layers.push_back(l);
             }
 
-            // Send KV transfer header (padded to packet_size)
+            // Phase 1: Send header padded to packet_size
             KvTransferHeader hdr{};
             hdr.magic = KV_TRANSFER_MAGIC;
             hdr.num_slices = static_cast<int32_t>(departing_layers.size());
@@ -89,19 +93,27 @@ namespace Inference {
             std::memcpy(hdr_buf.data(), &hdr, sizeof(hdr));
             dist_config.transport->send_next(hdr_buf.data(), packet_size);
 
-            // Send each departing layer's KV data
+            // Phase 2: Build and send payload
+            const size_t payload_size = departing_layers.size() * per_slice_size;
+            std::vector<char> payload(payload_size);
+            char *wp = payload.data();
+
             for (int32_t layer_id : departing_layers) {
-                // Send layer_id
-                dist_config.transport->send_next(&layer_id, sizeof(layer_id));
-                // Send key cache for this layer
-                float *key_ptr = key_cache + static_cast<size_t>(layer_id) * seq_len * kv_dim;
-                dist_config.transport->send_next(key_ptr, slice_data_size);
-                // Send value cache for this layer
-                float *val_ptr = value_cache + static_cast<size_t>(layer_id) * seq_len * kv_dim;
-                dist_config.transport->send_next(val_ptr, slice_data_size);
+                std::memcpy(wp, &layer_id, sizeof(layer_id));
+                wp += sizeof(layer_id);
+                float *kp = key_cache + static_cast<size_t>(layer_id) * seq_len * kv_dim;
+                std::memcpy(wp, kp, slice_bytes);
+                wp += slice_bytes;
+                float *vp = value_cache + static_cast<size_t>(layer_id) * seq_len * kv_dim;
+                std::memcpy(wp, vp, slice_bytes);
+                wp += slice_bytes;
             }
 
-            // Now receive the return bundle (layers coming back from workers)
+            if (payload_size > 0) {
+                dist_config.transport->send_next(payload.data(), payload_size);
+            }
+
+            // Receive return: Phase 1 (header in packet_size)
             std::vector<char> recv_hdr_buf(packet_size);
             dist_config.transport->recv_prev(recv_hdr_buf.data(), packet_size);
 
@@ -109,108 +121,138 @@ namespace Inference {
             std::memcpy(&recv_hdr, recv_hdr_buf.data(), sizeof(recv_hdr));
 
             if (recv_hdr.magic == KV_TRANSFER_MAGIC && recv_hdr.num_slices > 0) {
+                // Receive return: Phase 2 (payload)
+                const size_t recv_payload_size = recv_hdr.num_slices * per_slice_size;
+                std::vector<char> recv_payload(recv_payload_size);
+                dist_config.transport->recv_prev(recv_payload.data(), recv_payload_size);
+
+                const char *rp = recv_payload.data();
                 for (int i = 0; i < recv_hdr.num_slices; i++) {
                     int32_t layer_id;
-                    dist_config.transport->recv_prev(&layer_id, sizeof(layer_id));
+                    std::memcpy(&layer_id, rp, sizeof(layer_id));
+                    rp += sizeof(layer_id);
 
-                    // Check if this layer is in master's new range [0, new_split)
                     if (layer_id >= 0 && layer_id < new_split) {
-                        float *key_ptr = key_cache + static_cast<size_t>(layer_id) * seq_len * kv_dim;
-                        dist_config.transport->recv_prev(key_ptr, slice_data_size);
-                        float *val_ptr = value_cache + static_cast<size_t>(layer_id) * seq_len * kv_dim;
-                        dist_config.transport->recv_prev(val_ptr, slice_data_size);
+                        float *kp = key_cache + static_cast<size_t>(layer_id) * seq_len * kv_dim;
+                        std::memcpy(kp, rp, slice_bytes);
+                        rp += slice_bytes;
+                        float *vp = value_cache + static_cast<size_t>(layer_id) * seq_len * kv_dim;
+                        std::memcpy(vp, rp, slice_bytes);
+                        rp += slice_bytes;
                     } else {
-                        // Discard (shouldn't happen after full ring rotation)
-                        std::vector<char> discard(slice_data_size);
-                        dist_config.transport->recv_prev(discard.data(), slice_data_size);
-                        dist_config.transport->recv_prev(discard.data(), slice_data_size);
+                        rp += slice_bytes * 2;
                     }
                 }
             }
         }
 
-        // KV Cache Transfer: Worker handles an incoming KV bundle
-        // Extracts layers it needs, adds its departing layers, forwards the rest
+        // Worker handles KV transfer: called after detecting KV_TRANSFER_MAGIC in transfer_buffer
+        // The header has already been received in the worker_loop's recv_prev.
         void handle_kv_transfer(float *key_cache, float *value_cache,
                                 int kv_dim, int seq_len,
                                 int old_start, int old_end,
                                 int new_start, int new_end,
                                 const KvTransferHeader &incoming_hdr) {
             const int pos = incoming_hdr.pos;
-            const size_t slice_data_size = static_cast<size_t>(pos) * kv_dim * sizeof(float);
+            const size_t slice_bytes = static_cast<size_t>(pos) * kv_dim * sizeof(float);
+            const size_t per_slice_size = sizeof(int32_t) + slice_bytes * 2;
             const size_t packet_size = dist_config.transport->get_packet_size();
 
-            // Receive all incoming slices
+            // Phase 2: Receive payload (if any slices)
             struct KvSlice {
                 int32_t layer_id;
-                std::vector<float> key_data;
-                std::vector<float> value_data;
+                const char *key_ptr;
+                const char *val_ptr;
             };
             std::vector<KvSlice> incoming_slices;
+            std::vector<char> recv_payload;
 
-            for (int i = 0; i < incoming_hdr.num_slices; i++) {
-                KvSlice slice;
-                dist_config.transport->recv_prev(&slice.layer_id, sizeof(slice.layer_id));
-                slice.key_data.resize(static_cast<size_t>(pos) * kv_dim);
-                slice.value_data.resize(static_cast<size_t>(pos) * kv_dim);
-                dist_config.transport->recv_prev(slice.key_data.data(), slice_data_size);
-                dist_config.transport->recv_prev(slice.value_data.data(), slice_data_size);
-                incoming_slices.push_back(std::move(slice));
-            }
+            if (incoming_hdr.num_slices > 0) {
+                const size_t payload_size = incoming_hdr.num_slices * per_slice_size;
+                recv_payload.resize(payload_size);
+                dist_config.transport->recv_prev(recv_payload.data(), payload_size);
 
-            // Extract layers this worker needs (in new range but NOT in old range)
-            for (auto &slice : incoming_slices) {
-                if (slice.layer_id >= new_start && slice.layer_id < new_end) {
-                    // Copy into our KV cache
-                    float *key_ptr = key_cache + static_cast<size_t>(slice.layer_id) * seq_len * kv_dim;
-                    float *val_ptr = value_cache + static_cast<size_t>(slice.layer_id) * seq_len * kv_dim;
-                    std::memcpy(key_ptr, slice.key_data.data(), slice_data_size);
-                    std::memcpy(val_ptr, slice.value_data.data(), slice_data_size);
-                    slice.layer_id = -1;  // Mark as consumed
+                const char *rp = recv_payload.data();
+                for (int i = 0; i < incoming_hdr.num_slices; i++) {
+                    KvSlice s;
+                    std::memcpy(&s.layer_id, rp, sizeof(s.layer_id));
+                    rp += sizeof(s.layer_id);
+                    s.key_ptr = rp;
+                    rp += slice_bytes;
+                    s.val_ptr = rp;
+                    rp += slice_bytes;
+                    incoming_slices.push_back(s);
                 }
             }
 
-            // Build forward bundle: unconsumed incoming slices + our departing layers
-            std::vector<KvSlice> forward_slices;
-
-            // Add unconsumed incoming slices
-            for (auto &slice : incoming_slices) {
-                if (slice.layer_id >= 0) {
-                    forward_slices.push_back(std::move(slice));
+            // Extract layers this worker needs
+            std::vector<bool> consumed(incoming_slices.size(), false);
+            for (size_t i = 0; i < incoming_slices.size(); i++) {
+                auto &s = incoming_slices[i];
+                if (s.layer_id >= new_start && s.layer_id < new_end) {
+                    float *kd = key_cache + static_cast<size_t>(s.layer_id) * seq_len * kv_dim;
+                    float *vd = value_cache + static_cast<size_t>(s.layer_id) * seq_len * kv_dim;
+                    std::memcpy(kd, s.key_ptr, slice_bytes);
+                    std::memcpy(vd, s.val_ptr, slice_bytes);
+                    consumed[i] = true;
                 }
             }
 
-            // Add our departing layers (in old range but NOT in new range)
+            // Count forward slices
+            int forward_count = 0;
+            for (size_t i = 0; i < consumed.size(); i++) {
+                if (!consumed[i]) forward_count++;
+            }
             for (int l = old_start; l < old_end; l++) {
-                if (l < new_start || l >= new_end) {
-                    KvSlice slice;
-                    slice.layer_id = l;
-                    slice.key_data.resize(static_cast<size_t>(pos) * kv_dim);
-                    slice.value_data.resize(static_cast<size_t>(pos) * kv_dim);
-                    float *key_ptr = key_cache + static_cast<size_t>(l) * seq_len * kv_dim;
-                    float *val_ptr = value_cache + static_cast<size_t>(l) * seq_len * kv_dim;
-                    std::memcpy(slice.key_data.data(), key_ptr, slice_data_size);
-                    std::memcpy(slice.value_data.data(), val_ptr, slice_data_size);
-                    forward_slices.push_back(std::move(slice));
-                }
+                if (l < new_start || l >= new_end) forward_count++;
             }
 
-            // Send forward bundle header
+            // Phase 1: Send forward header (padded to packet_size)
             KvTransferHeader fwd_hdr{};
             fwd_hdr.magic = KV_TRANSFER_MAGIC;
-            fwd_hdr.num_slices = static_cast<int32_t>(forward_slices.size());
+            fwd_hdr.num_slices = forward_count;
             fwd_hdr.pos = pos;
             fwd_hdr.kv_dim = kv_dim;
 
-            std::vector<char> hdr_buf(packet_size, 0);
-            std::memcpy(hdr_buf.data(), &fwd_hdr, sizeof(fwd_hdr));
-            dist_config.transport->send_next(hdr_buf.data(), packet_size);
+            std::vector<char> fwd_hdr_buf(packet_size, 0);
+            std::memcpy(fwd_hdr_buf.data(), &fwd_hdr, sizeof(fwd_hdr));
+            dist_config.transport->send_next(fwd_hdr_buf.data(), packet_size);
 
-            // Send each forwarded slice
-            for (auto &slice : forward_slices) {
-                dist_config.transport->send_next(&slice.layer_id, sizeof(slice.layer_id));
-                dist_config.transport->send_next(slice.key_data.data(), slice_data_size);
-                dist_config.transport->send_next(slice.value_data.data(), slice_data_size);
+            // Phase 2: Build and send forward payload
+            if (forward_count > 0) {
+                const size_t fwd_payload_size = forward_count * per_slice_size;
+                std::vector<char> fwd_payload(fwd_payload_size);
+                char *wp = fwd_payload.data();
+
+                // Unconsumed incoming slices
+                for (size_t i = 0; i < incoming_slices.size(); i++) {
+                    if (!consumed[i]) {
+                        auto &s = incoming_slices[i];
+                        std::memcpy(wp, &s.layer_id, sizeof(s.layer_id));
+                        wp += sizeof(s.layer_id);
+                        std::memcpy(wp, s.key_ptr, slice_bytes);
+                        wp += slice_bytes;
+                        std::memcpy(wp, s.val_ptr, slice_bytes);
+                        wp += slice_bytes;
+                    }
+                }
+
+                // Our departing layers
+                for (int l = old_start; l < old_end; l++) {
+                    if (l < new_start || l >= new_end) {
+                        int32_t layer_id = l;
+                        std::memcpy(wp, &layer_id, sizeof(layer_id));
+                        wp += sizeof(layer_id);
+                        float *kp = key_cache + static_cast<size_t>(l) * seq_len * kv_dim;
+                        std::memcpy(wp, kp, slice_bytes);
+                        wp += slice_bytes;
+                        float *vp = value_cache + static_cast<size_t>(l) * seq_len * kv_dim;
+                        std::memcpy(wp, vp, slice_bytes);
+                        wp += slice_bytes;
+                    }
+                }
+
+                dist_config.transport->send_next(fwd_payload.data(), fwd_payload_size);
             }
         }
 

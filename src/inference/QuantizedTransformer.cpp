@@ -1080,12 +1080,18 @@ namespace Inference {
         std::cout << "Worker started. Processing layers " << start_layer << " to " << dist_config.end_layer - 1 <<
                 std::endl;
 
+        // Track old layer range for KV cache transfer
+        int old_start = start_layer;
+        int old_end = dist_config.end_layer;
+
         while (true) {
             try {
                 // Check for control messages (non-blocking)
                 ControlMessage ctrl_msg{};
                 if (dist_config.transport->recv_control_nonblocking(ctrl_msg)) {
                     if (ctrl_msg.type == ControlMessageType::RESIZE_LAYERS) {
+                        old_start = dist_config.split_layer;
+                        old_end = dist_config.end_layer;
                         update_layer_config(ctrl_msg);
                         start_layer = dist_config.split_layer;
                         std::cout << "Worker: Layer config updated. Now processing layers "
@@ -1099,7 +1105,9 @@ namespace Inference {
                         ack.is_tail = dist_config.is_tail;
                         dist_config.transport->send_control(ack);
                     } else if (ctrl_msg.type == ControlMessageType::RESIZE_CHAIN) {
-                        // Multi-worker chain resize: apply our config and forward
+                        // Multi-worker chain resize: save old range, then apply
+                        old_start = dist_config.split_layer;
+                        old_end = dist_config.end_layer;
                         int my_idx = ctrl_msg.worker_index;
                         if (my_idx >= 0 && my_idx < ctrl_msg.total_workers) {
                             dist_config.split_layer = ctrl_msg.ranges[my_idx].start_layer;
@@ -1141,6 +1149,8 @@ namespace Inference {
                     ControlPacketHeader ctrl_pkt{};
                     std::memcpy(&ctrl_pkt, transfer_buffer.data(), sizeof(ctrl_pkt));
                     if (ctrl_pkt.msg.type == ControlMessageType::RESIZE_LAYERS) {
+                        old_start = dist_config.split_layer;
+                        old_end = dist_config.end_layer;
                         update_layer_config(ctrl_pkt.msg);
                         start_layer = dist_config.split_layer;
                         std::cout << "Worker: Layer config updated (inline). Now processing layers "
@@ -1154,7 +1164,9 @@ namespace Inference {
                         ack.is_tail = dist_config.is_tail;
                         dist_config.transport->send_control(ack);
                     } else if (ctrl_pkt.msg.type == ControlMessageType::RESIZE_CHAIN) {
-                        // Multi-worker chain resize (inline)
+                        // Multi-worker chain resize (inline): save old range first
+                        old_start = dist_config.split_layer;
+                        old_end = dist_config.end_layer;
                         int my_idx = ctrl_pkt.msg.worker_index;
                         if (my_idx >= 0 && my_idx < ctrl_pkt.msg.total_workers) {
                             dist_config.split_layer = ctrl_pkt.msg.ranges[my_idx].start_layer;
@@ -1186,6 +1198,30 @@ namespace Inference {
                         dist_config.transport->send_control(ctrl_pkt.msg);
                     }
                     continue;  // Skip normal processing for control packets
+                }
+
+                // Check for KV cache transfer bundle
+                if (magic == KV_TRANSFER_MAGIC) {
+                    KvTransferHeader kv_hdr{};
+                    std::memcpy(&kv_hdr, transfer_buffer.data(), sizeof(kv_hdr));
+                    const int kv_dim = config.dim * config.n_kv_heads / config.n_heads;
+                    
+                    std::cout << "Worker: KV transfer received (" << kv_hdr.num_slices 
+                              << " slices, pos=" << kv_hdr.pos << ")" << std::endl;
+                    
+                    handle_kv_transfer(
+                        state.key_cache.data(), state.value_cache.data(),
+                        kv_dim, config.seq_len,
+                        old_start, old_end,
+                        dist_config.split_layer, dist_config.end_layer,
+                        kv_hdr);
+                    
+                    // Update old range to current (transfer complete)
+                    old_start = dist_config.split_layer;
+                    old_end = dist_config.end_layer;
+                    
+                    std::cout << "Worker: KV transfer complete" << std::endl;
+                    continue;  // Skip normal processing for KV transfer packets
                 }
 
                 std::memcpy(&header, transfer_buffer.data(), sizeof(PacketHeader));

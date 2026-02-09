@@ -220,7 +220,8 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, cons
                         }
                         if (!valid) continue;
                         
-                        // Update master's split_layer
+                        // Update master's split_layer (save old value for KV transfer)
+                        int old_split = transformer->dist_config.split_layer;
                         transformer->dist_config.split_layer = boundaries[0];
                         
                         if (num_boundaries == 1) {
@@ -294,12 +295,16 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, cons
                             }
                         }
                         
-                        // CRITICAL: Clear KV cache and reset conversation state after resize
-                        // KV cache state cannot be transferred between nodes when layers are redistributed
-                        transformer->clear_kv_cache();
-                        pos = 0;
-                        prompt_tokens.clear();
-                        std::cout << "\n[Context reset - conversation restarted after layer redistribution]\n";
+                        // KV Cache Transfer: seamlessly move cache data between nodes
+                        if (pos > 0) {
+                            const int kv_dim = transformer->config.dim * transformer->config.n_kv_heads / transformer->config.n_heads;
+                            std::cout << "Transferring KV cache (" << pos << " positions)..." << std::endl;
+                            transformer->initiate_kv_transfer(
+                                transformer->get_key_cache(), transformer->get_value_cache(),
+                                pos, kv_dim, transformer->config.seq_len,
+                                old_split, boundaries[0]);
+                            std::cout << "[KV cache transferred - context preserved]\n";
+                        }
                         
                         continue;
                     } else if (cmd == "/help") {

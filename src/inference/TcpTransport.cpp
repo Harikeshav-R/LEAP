@@ -216,16 +216,24 @@ namespace Inference {
 
         if (magic != CONTROL_MAGIC) return false;
 
-        // It's a control packet, read the full header
-        ControlPacketHeader pkt{};
+        // It's a control packet - must read the FULL padded packet to keep stream in sync
+        // send_control pads to packet_size_, so we must consume that many bytes
+        size_t recv_size = (packet_size_ > 0 && packet_size_ >= sizeof(ControlPacketHeader)) 
+                           ? packet_size_ 
+                           : sizeof(ControlPacketHeader);
+        
+        std::vector<char> buffer(recv_size);
         size_t total_received = 0;
-        auto *bytes = reinterpret_cast<char *>(&pkt);
-        while (total_received < sizeof(pkt)) {
-            const ssize_t received = ::recv(ingress_fd, bytes + total_received, sizeof(pkt) - total_received, 0);
+        while (total_received < recv_size) {
+            const ssize_t received = ::recv(ingress_fd, buffer.data() + total_received, 
+                                            recv_size - total_received, 0);
             if (received <= 0) return false;
             total_received += received;
         }
 
+        // Extract the control packet header from the buffer
+        ControlPacketHeader pkt{};
+        std::memcpy(&pkt, buffer.data(), sizeof(pkt));
         msg = pkt.msg;
         return true;
     }

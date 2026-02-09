@@ -293,6 +293,14 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, cons
                                 start = boundaries[i + 1];
                             }
                         }
+                        
+                        // CRITICAL: Clear KV cache and reset conversation state after resize
+                        // KV cache state cannot be transferred between nodes when layers are redistributed
+                        transformer->clear_kv_cache();
+                        pos = 0;
+                        prompt_tokens.clear();
+                        std::cout << "\n[Context reset - conversation restarted after layer redistribution]\n";
+                        
                         continue;
                     } else if (cmd == "/help") {
                         std::cout << "Available commands:\n";

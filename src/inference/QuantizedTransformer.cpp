@@ -80,6 +80,11 @@ namespace Inference {
         }
     }
 
+    void QuantizedTransformer::clear_kv_cache() {
+        std::memset(state.key_cache.data(), 0, state.key_cache.size() * sizeof(float));
+        std::memset(state.value_cache.data(), 0, state.value_cache.size() * sizeof(float));
+    }
+
     std::vector<QuantizedTensor> QuantizedTransformer::init_quantized_tensors(
         void **ptr, const int n, const int size_each) const {
         void *p = *ptr;

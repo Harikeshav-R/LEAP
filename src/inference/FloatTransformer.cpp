@@ -71,6 +71,11 @@ namespace Inference {
         }
     }
 
+    void FloatTransformer::clear_kv_cache() {
+        std::memset(state.key_cache.data(), 0, state.key_cache.size() * sizeof(float));
+        std::memset(state.value_cache.data(), 0, state.value_cache.size() * sizeof(float));
+    }
+
     void FloatTransformer::rmsnorm(float *__restrict__ o, const float *__restrict__ x, const float *__restrict__ weight,
                                    const int size) {
         float ss = 0.0f;

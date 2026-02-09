@@ -54,6 +54,9 @@ namespace Inference {
             dist_config.is_tail = msg.is_tail;
         }
 
+        // Clear KV cache (needed after layer redistribution to avoid stale state)
+        virtual void clear_kv_cache() = 0;
+
         // Factory method to create the appropriate Transformer (Float or Quantized) based on file
         static std::unique_ptr<Transformer> create(const std::string &checkpoint_path);
 

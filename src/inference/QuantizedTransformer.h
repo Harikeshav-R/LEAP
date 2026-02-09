@@ -69,6 +69,8 @@ namespace Inference {
 
         void worker_loop() override;
 
+        void clear_kv_cache() override;
+
     private:
         QuantizedTransformerWeights weights{};
         QuantizedRunState state{};

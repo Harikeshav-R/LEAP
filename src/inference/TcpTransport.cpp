@@ -7,6 +7,7 @@
 #include <iostream>
 #include <cstring>
 #include <sys/uio.h> // For writev
+#include <poll.h>    // For non-blocking control recv
 
 namespace Inference {
     TcpTransport::TcpTransport(std::string ip, const int port, std::string next_ip, const int next_port)
@@ -178,5 +179,49 @@ namespace Inference {
             if (received == 0) throw std::runtime_error("Prev node disconnected");
             total_received += received;
         }
+    }
+
+    void TcpTransport::send_control(const ControlMessage &msg) {
+        if (egress_fd == -1) throw std::runtime_error("No next node connected for control");
+        ControlPacketHeader pkt{CONTROL_MAGIC, msg};
+        size_t total_sent = 0;
+        const auto *bytes = reinterpret_cast<const char *>(&pkt);
+        while (total_sent < sizeof(pkt)) {
+            const ssize_t sent = ::send(egress_fd, bytes + total_sent, sizeof(pkt) - total_sent, 0);
+            if (sent < 0) throw std::runtime_error("Send control failed");
+            total_sent += sent;
+        }
+    }
+
+    bool TcpTransport::recv_control_nonblocking(ControlMessage &msg) {
+        if (ingress_fd == -1) return false;
+
+        // Use poll to check if data is available without blocking
+        struct pollfd pfd{};
+        pfd.fd = ingress_fd;
+        pfd.events = POLLIN;
+
+        int ret = poll(&pfd, 1, 0);  // 0 timeout = non-blocking
+        if (ret <= 0) return false;
+
+        // Peek at the first 2 bytes to check for control magic
+        uint16_t magic = 0;
+        ssize_t peeked = ::recv(ingress_fd, &magic, sizeof(magic), MSG_PEEK);
+        if (peeked < static_cast<ssize_t>(sizeof(magic))) return false;
+
+        if (magic != CONTROL_MAGIC) return false;
+
+        // It's a control packet, read the full header
+        ControlPacketHeader pkt{};
+        size_t total_received = 0;
+        auto *bytes = reinterpret_cast<char *>(&pkt);
+        while (total_received < sizeof(pkt)) {
+            const ssize_t received = ::recv(ingress_fd, bytes + total_received, sizeof(pkt) - total_received, 0);
+            if (received <= 0) return false;
+            total_received += received;
+        }
+
+        msg = pkt.msg;
+        return true;
     }
 } // namespace Inference

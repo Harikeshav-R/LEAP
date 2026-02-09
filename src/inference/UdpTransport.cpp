@@ -7,6 +7,7 @@
 #include <iostream>
 #include <cstring>
 #include <algorithm>
+#include <poll.h>
 
 namespace Inference {
     UdpTransport::UdpTransport(std::string ip, const int port, std::string next_ip, int next_port)
@@ -226,5 +227,52 @@ namespace Inference {
             received_chunks[chunk] = true;
             chunks_count++;
         }
+    }
+
+    void UdpTransport::send_control(const ControlMessage &msg) {
+        if (next_addr.sin_family == 0) throw std::runtime_error("Next address not configured for control");
+
+        ControlPacketHeader pkt{CONTROL_MAGIC, msg};
+        
+        if (sendto(sockfd, &pkt, sizeof(pkt), 0,
+                   reinterpret_cast<const struct sockaddr *>(&next_addr), sizeof(next_addr)) < 0) {
+            throw std::runtime_error("UDP send control failed");
+        }
+    }
+
+    bool UdpTransport::recv_control_nonblocking(ControlMessage &msg) {
+        if (sockfd < 0) return false;
+
+        // Use poll to check if data is available without blocking
+        struct pollfd pfd{};
+        pfd.fd = sockfd;
+        pfd.events = POLLIN;
+
+        int ret = poll(&pfd, 1, 0);  // 0 timeout = non-blocking
+        if (ret <= 0) return false;
+
+        // Peek to check packet size and magic
+        uint8_t peek_buf[sizeof(ControlPacketHeader)];
+        sockaddr_in src_addr{};
+        socklen_t addr_len = sizeof(src_addr);
+
+        ssize_t peeked = recvfrom(sockfd, peek_buf, sizeof(peek_buf), MSG_PEEK,
+                                   reinterpret_cast<struct sockaddr *>(&src_addr), &addr_len);
+
+        if (peeked < static_cast<ssize_t>(sizeof(ControlPacketHeader))) return false;
+
+        // Check for control magic (first 2 bytes)
+        uint16_t magic = 0;
+        std::memcpy(&magic, peek_buf, sizeof(magic));
+        if (magic != CONTROL_MAGIC) return false;
+
+        // It's a control packet, consume it
+        ControlPacketHeader pkt{};
+        ssize_t received = recvfrom(sockfd, &pkt, sizeof(pkt), 0,
+                                     reinterpret_cast<struct sockaddr *>(&src_addr), &addr_len);
+        if (received < static_cast<ssize_t>(sizeof(pkt))) return false;
+
+        msg = pkt.msg;
+        return true;
     }
 }

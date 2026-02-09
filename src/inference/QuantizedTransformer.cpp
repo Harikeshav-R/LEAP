@@ -982,7 +982,7 @@ namespace Inference {
         const int dim = config.dim;
         PacketHeader header{};
 
-        const int start_layer = dist_config.split_layer;
+        int start_layer = dist_config.split_layer;
         // end_layer logic consistent with FloatTransformer update
         // Use dist_config.end_layer if set (via main.cpp defaults to n_layers)
 
@@ -994,8 +994,89 @@ namespace Inference {
 
         while (true) {
             try {
+                // Check for control messages (non-blocking)
+                ControlMessage ctrl_msg{};
+                if (dist_config.transport->recv_control_nonblocking(ctrl_msg)) {
+                    if (ctrl_msg.type == ControlMessageType::RESIZE_LAYERS) {
+                        update_layer_config(ctrl_msg);
+                        start_layer = dist_config.split_layer;
+                        std::cout << "Worker: Layer config updated. Now processing layers "
+                                  << start_layer << " to " << dist_config.end_layer - 1 << std::endl;
+                        
+                        // Send ACK back (optional, for confirmation)
+                        ControlMessage ack{};
+                        ack.type = ControlMessageType::ACK;
+                        ack.split_layer = start_layer;
+                        ack.end_layer = dist_config.end_layer;
+                        ack.is_tail = dist_config.is_tail;
+                        dist_config.transport->send_control(ack);
+                    } else if (ctrl_msg.type == ControlMessageType::RESIZE_CHAIN) {
+                        // Multi-worker chain resize: apply our config and forward
+                        int my_idx = ctrl_msg.worker_index;
+                        if (my_idx >= 0 && my_idx < ctrl_msg.total_workers) {
+                            dist_config.split_layer = ctrl_msg.ranges[my_idx].start_layer;
+                            dist_config.end_layer = ctrl_msg.ranges[my_idx].end_layer;
+                            dist_config.is_tail = ctrl_msg.ranges[my_idx].is_tail;
+                            start_layer = dist_config.split_layer;
+                            
+                            std::cout << "Worker " << my_idx << ": Layer config updated. Now processing layers "
+                                      << start_layer << " to " << dist_config.end_layer - 1 
+                                      << (dist_config.is_tail ? " (tail)" : "") << std::endl;
+                        }
+                        
+                        // Forward to next worker if there are more workers
+                        if (my_idx + 1 < ctrl_msg.total_workers) {
+                            ctrl_msg.worker_index = my_idx + 1;
+                            dist_config.transport->send_control(ctrl_msg);
+                        }
+                    }
+                }
+
                 // Receive header + data from Prev
                 dist_config.transport->recv_prev(transfer_buffer.data(), packet_size);
+
+                // Check if this is actually a control message (for inline control on kernel transport)
+                uint16_t magic = 0;
+                std::memcpy(&magic, transfer_buffer.data(), sizeof(magic));
+                if (magic == CONTROL_MAGIC) {
+                    ControlPacketHeader ctrl_pkt{};
+                    std::memcpy(&ctrl_pkt, transfer_buffer.data(), sizeof(ctrl_pkt));
+                    if (ctrl_pkt.msg.type == ControlMessageType::RESIZE_LAYERS) {
+                        update_layer_config(ctrl_pkt.msg);
+                        start_layer = dist_config.split_layer;
+                        std::cout << "Worker: Layer config updated (inline). Now processing layers "
+                                  << start_layer << " to " << dist_config.end_layer - 1 << std::endl;
+                        
+                        // Send ACK back
+                        ControlMessage ack{};
+                        ack.type = ControlMessageType::ACK;
+                        ack.split_layer = start_layer;
+                        ack.end_layer = dist_config.end_layer;
+                        ack.is_tail = dist_config.is_tail;
+                        dist_config.transport->send_control(ack);
+                    } else if (ctrl_pkt.msg.type == ControlMessageType::RESIZE_CHAIN) {
+                        // Multi-worker chain resize (inline)
+                        int my_idx = ctrl_pkt.msg.worker_index;
+                        if (my_idx >= 0 && my_idx < ctrl_pkt.msg.total_workers) {
+                            dist_config.split_layer = ctrl_pkt.msg.ranges[my_idx].start_layer;
+                            dist_config.end_layer = ctrl_pkt.msg.ranges[my_idx].end_layer;
+                            dist_config.is_tail = ctrl_pkt.msg.ranges[my_idx].is_tail;
+                            start_layer = dist_config.split_layer;
+                            
+                            std::cout << "Worker " << my_idx << ": Layer config updated (inline). Now processing layers "
+                                      << start_layer << " to " << dist_config.end_layer - 1 
+                                      << (dist_config.is_tail ? " (tail)" : "") << std::endl;
+                        }
+                        
+                        // Forward to next worker if there are more workers
+                        if (my_idx + 1 < ctrl_pkt.msg.total_workers) {
+                            ControlMessage fwd = ctrl_pkt.msg;
+                            fwd.worker_index = my_idx + 1;
+                            dist_config.transport->send_control(fwd);
+                        }
+                    }
+                    continue;  // Skip normal processing for control packets
+                }
 
                 std::memcpy(&header, transfer_buffer.data(), sizeof(PacketHeader));
                 std::memcpy(x, transfer_buffer.data() + sizeof(PacketHeader), dim * sizeof(float));

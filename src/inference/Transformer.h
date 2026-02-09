@@ -47,6 +47,13 @@ namespace Inference {
             dist_config = config;
         }
 
+        // Update layer configuration at runtime (for dynamic resizing)
+        virtual void update_layer_config(const ControlMessage &msg) {
+            dist_config.split_layer = msg.split_layer;
+            dist_config.end_layer = msg.end_layer;
+            dist_config.is_tail = msg.is_tail;
+        }
+
         // Factory method to create the appropriate Transformer (Float or Quantized) based on file
         static std::unique_ptr<Transformer> create(const std::string &checkpoint_path);
 

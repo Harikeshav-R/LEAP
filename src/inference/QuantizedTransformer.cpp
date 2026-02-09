@@ -1031,7 +1031,18 @@ namespace Inference {
                         if (my_idx + 1 < ctrl_msg.total_workers) {
                             ctrl_msg.worker_index = my_idx + 1;
                             dist_config.transport->send_control(ctrl_msg);
+                        } else {
+                            // This is the last worker - send ACK back through the ring
+                            ControlMessage ack{};
+                            ack.type = ControlMessageType::ACK;
+                            ack.split_layer = start_layer;
+                            ack.end_layer = dist_config.end_layer;
+                            ack.is_tail = dist_config.is_tail;
+                            dist_config.transport->send_control(ack);
                         }
+                    } else if (ctrl_msg.type == ControlMessageType::ACK) {
+                        // Forward ACK to next node (back to master)
+                        dist_config.transport->send_control(ctrl_msg);
                     }
                 }
 
@@ -1076,7 +1087,18 @@ namespace Inference {
                             ControlMessage fwd = ctrl_pkt.msg;
                             fwd.worker_index = my_idx + 1;
                             dist_config.transport->send_control(fwd);
+                        } else {
+                            // This is the last worker - send ACK back through the ring
+                            ControlMessage ack{};
+                            ack.type = ControlMessageType::ACK;
+                            ack.split_layer = start_layer;
+                            ack.end_layer = dist_config.end_layer;
+                            ack.is_tail = dist_config.is_tail;
+                            dist_config.transport->send_control(ack);
                         }
+                    } else if (ctrl_pkt.msg.type == ControlMessageType::ACK) {
+                        // Forward ACK to next node (back to master)
+                        dist_config.transport->send_control(ctrl_pkt.msg);
                     }
                     continue;  // Skip normal processing for control packets
                 }

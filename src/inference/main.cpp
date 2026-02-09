@@ -10,6 +10,8 @@
 #include <vector>
 #include <string>
 #include <sstream>
+#include <thread>
+#include <chrono>
 
 using namespace Inference;
 
@@ -17,6 +19,47 @@ void read_stdin(const char *guide, std::string &buffer) {
     std::cout << guide;
     std::getline(std::cin, buffer);
 }
+
+// Wait for ACK message from workers after sending resize command.
+// The ACK travels around the ring back to the master.
+// Returns true if ACK received within timeout, false otherwise.
+bool wait_for_resize_ack(Transport* transport, int timeout_ms = 5000) {
+    size_t packet_size = transport->get_packet_size();
+    if (packet_size == 0) {
+        // Fallback: no packet size set, use control header size
+        packet_size = sizeof(ControlPacketHeader);
+    }
+    
+    std::vector<char> buffer(packet_size);
+    
+    auto start = std::chrono::steady_clock::now();
+    while (true) {
+        // Check for timeout
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start).count();
+        if (elapsed >= timeout_ms) {
+            std::cerr << "Warning: Resize ACK timeout after " << timeout_ms << "ms" << std::endl;
+            return false;
+        }
+        
+        // Receive a packet (blocking)
+        transport->recv_prev(buffer.data(), packet_size);
+        
+        // Check if it's an ACK
+        uint16_t magic = 0;
+        std::memcpy(&magic, buffer.data(), sizeof(magic));
+        if (magic == CONTROL_MAGIC) {
+            ControlPacketHeader pkt{};
+            std::memcpy(&pkt, buffer.data(), sizeof(pkt));
+            if (pkt.msg.type == ControlMessageType::ACK) {
+                return true;  // Successfully received ACK
+            }
+        }
+        // Not an ACK - this shouldn't happen in normal operation
+        // but continue waiting in case of spurious packets
+    }
+}
+
 
 void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, const std::string &prompt,
               const int steps) {
@@ -189,7 +232,10 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, cons
                             msg.is_tail = true;
                             transformer->dist_config.transport->send_control(msg);
                             
-                            std::cout << "Resize command sent.\n";
+                            // Wait for ACK from worker to ensure resize is applied
+                            if (wait_for_resize_ack(transformer->dist_config.transport)) {
+                                std::cout << "Resize complete (ACK received).\n";
+                            }
                             std::cout << "  Master: layers 0 to " << boundaries[0] - 1 << "\n";
                             std::cout << "  Worker: layers " << boundaries[0] << " to " << n_layers - 1 << " (tail)\n";
                         } else if (num_boundaries == 2) {
@@ -201,7 +247,10 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, cons
                             msg.is_tail = (boundaries[1] == n_layers);
                             transformer->dist_config.transport->send_control(msg);
                             
-                            std::cout << "Resize command sent.\n";
+                            // Wait for ACK from worker
+                            if (wait_for_resize_ack(transformer->dist_config.transport)) {
+                                std::cout << "Resize complete (ACK received).\n";
+                            }
                             std::cout << "  Master: layers 0 to " << boundaries[0] - 1 << "\n";
                             std::cout << "  Worker: layers " << boundaries[0] << " to " << boundaries[1] - 1;
                             if (msg.is_tail) std::cout << " (tail)";
@@ -230,7 +279,10 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, cons
                             
                             transformer->dist_config.transport->send_control(msg);
                             
-                            std::cout << "Chain resize command sent.\n";
+                            // Wait for ACK from tail worker (propagates through entire chain)
+                            if (wait_for_resize_ack(transformer->dist_config.transport)) {
+                                std::cout << "Chain resize complete (ACK received).\n";
+                            }
                             std::cout << "  Master: layers 0 to " << boundaries[0] - 1 << "\n";
                             start = boundaries[0];
                             for (int i = 0; i < num_workers; i++) {

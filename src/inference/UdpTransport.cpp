@@ -232,52 +232,28 @@ namespace Inference {
     void UdpTransport::send_control(const ControlMessage &msg) {
         if (next_addr.sin_family == 0) throw std::runtime_error("Next address not configured for control");
 
+        // For UDP, use the same chunked protocol as data packets to ensure ordering.
+        // Control messages are padded to packet_size_ and sent via send_next, which
+        // uses the leap_header chunking. Workers will detect them inline via CONTROL_MAGIC.
         ControlPacketHeader pkt{CONTROL_MAGIC, msg};
         
-        // Use packet_size_ padding if set for consistency
-        size_t send_size = (packet_size_ > 0 && packet_size_ >= sizeof(pkt)) ? packet_size_ : sizeof(pkt);
-        std::vector<char> buffer(send_size, 0);
-        std::memcpy(buffer.data(), &pkt, sizeof(pkt));
-        
-        if (sendto(sockfd, buffer.data(), send_size, 0,
-                   reinterpret_cast<const struct sockaddr *>(&next_addr), sizeof(next_addr)) < 0) {
-            throw std::runtime_error("UDP send control failed");
+        if (packet_size_ > 0 && packet_size_ >= sizeof(pkt)) {
+            // Pad to full packet size and send through chunking protocol
+            std::vector<char> buffer(packet_size_, 0);
+            std::memcpy(buffer.data(), &pkt, sizeof(pkt));
+            send_next(buffer.data(), buffer.size());
+        } else {
+            // Fallback: send raw (may not work reliably)
+            send_next(&pkt, sizeof(pkt));
         }
     }
 
     bool UdpTransport::recv_control_nonblocking(ControlMessage &msg) {
-        if (sockfd < 0) return false;
-
-        // Use poll to check if data is available without blocking
-        struct pollfd pfd{};
-        pfd.fd = sockfd;
-        pfd.events = POLLIN;
-
-        int ret = poll(&pfd, 1, 0);  // 0 timeout = non-blocking
-        if (ret <= 0) return false;
-
-        // Peek to check packet size and magic
-        uint8_t peek_buf[sizeof(ControlPacketHeader)];
-        sockaddr_in src_addr{};
-        socklen_t addr_len = sizeof(src_addr);
-
-        ssize_t peeked = recvfrom(sockfd, peek_buf, sizeof(peek_buf), MSG_PEEK,
-                                   reinterpret_cast<struct sockaddr *>(&src_addr), &addr_len);
-
-        if (peeked < static_cast<ssize_t>(sizeof(ControlPacketHeader))) return false;
-
-        // Check for control magic (first 2 bytes)
-        uint16_t magic = 0;
-        std::memcpy(&magic, peek_buf, sizeof(magic));
-        if (magic != CONTROL_MAGIC) return false;
-
-        // It's a control packet, consume it
-        ControlPacketHeader pkt{};
-        ssize_t received = recvfrom(sockfd, &pkt, sizeof(pkt), 0,
-                                     reinterpret_cast<struct sockaddr *>(&src_addr), &addr_len);
-        if (received < static_cast<ssize_t>(sizeof(pkt))) return false;
-
-        msg = pkt.msg;
-        return true;
+        // Control messages are now sent via the chunked protocol (send_next) for ordering.
+        // They will be received through recv_prev and detected inline in worker_loop
+        // by checking for CONTROL_MAGIC at the start of the received packet.
+        // Non-blocking control receive is not needed/supported with this approach.
+        (void)msg;
+        return false;
     }
 }

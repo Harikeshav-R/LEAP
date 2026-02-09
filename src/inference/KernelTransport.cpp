@@ -162,4 +162,29 @@ namespace Inference {
         // Recv from prev node - Update prev_ip
         recv_internal(data, size, true);
     }
+
+    void KernelTransport::send_control(const ControlMessage &msg) {
+        if (next_ip.empty()) throw std::runtime_error("Next IP not configured for KernelTransport control");
+
+        // For kernel transport, control messages use the same mechanism as regular data
+        // Pad to packet_size_ for consistent recv_prev handling
+        ControlPacketHeader pkt{CONTROL_MAGIC, msg};
+        
+        if (packet_size_ > 0 && packet_size_ >= sizeof(pkt)) {
+            std::vector<char> buffer(packet_size_, 0);
+            std::memcpy(buffer.data(), &pkt, sizeof(pkt));
+            send_next(buffer.data(), buffer.size());
+        } else {
+            send_next(&pkt, sizeof(pkt));
+        }
+    }
+
+    bool KernelTransport::recv_control_nonblocking(ControlMessage &msg) {
+        // Kernel transport uses blocking ioctl for data receive
+        // For control messages, we can't easily do non-blocking check without modifying kernel module
+        // For now, control messages for kernel transport are checked inline in worker_loop
+        // by inspecting the first bytes of received data before processing
+        (void)msg;
+        return false;  // Non-blocking control not directly supported; handled at higher level
+    }
 }

@@ -201,8 +201,24 @@ namespace Inference {
         if (temperature == 0.0f) {
             next = sample_argmax(logits, vocab_size);
         } else {
-            for (int q = 0; q < vocab_size; q++) {
-                logits[q] /= temperature;
+            // Vectorized temperature scaling
+            const float inv_temp = 1.0f / temperature;
+            int q = 0;
+#if defined(__AVX2__)
+            const __m256 inv_temp_vec = _mm256_set1_ps(inv_temp);
+            for (; q <= vocab_size - 8; q += 8) {
+                __m256 logit_vec = _mm256_loadu_ps(logits + q);
+                _mm256_storeu_ps(logits + q, _mm256_mul_ps(logit_vec, inv_temp_vec));
+            }
+#elif defined(__ARM_NEON)
+            const float32x4_t inv_temp_vec = vdupq_n_f32(inv_temp);
+            for (; q <= vocab_size - 4; q += 4) {
+                float32x4_t logit_vec = vld1q_f32(logits + q);
+                vst1q_f32(logits + q, vmulq_f32(logit_vec, inv_temp_vec));
+            }
+#endif
+            for (; q < vocab_size; q++) {
+                logits[q] *= inv_temp;
             }
             softmax(logits, vocab_size);
             const float coin = Utils::random_f32(rng_state);

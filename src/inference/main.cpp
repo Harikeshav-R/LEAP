@@ -9,6 +9,9 @@
 #include <iostream>
 #include <vector>
 #include <string>
+#include <sstream>
+#include <thread>
+#include <chrono>
 
 using namespace Inference;
 
@@ -16,6 +19,47 @@ void read_stdin(const char *guide, std::string &buffer) {
     std::cout << guide;
     std::getline(std::cin, buffer);
 }
+
+// Wait for ACK message from workers after sending resize command.
+// The ACK travels around the ring back to the master.
+// Returns true if ACK received within timeout, false otherwise.
+bool wait_for_resize_ack(Transport* transport, int timeout_ms = 5000) {
+    size_t packet_size = transport->get_packet_size();
+    if (packet_size == 0) {
+        // Fallback: no packet size set, use control header size
+        packet_size = sizeof(ControlPacketHeader);
+    }
+    
+    std::vector<char> buffer(packet_size);
+    
+    auto start = std::chrono::steady_clock::now();
+    while (true) {
+        // Check for timeout
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start).count();
+        if (elapsed >= timeout_ms) {
+            std::cerr << "Warning: Resize ACK timeout after " << timeout_ms << "ms" << std::endl;
+            return false;
+        }
+        
+        // Receive a packet (blocking)
+        transport->recv_prev(buffer.data(), packet_size);
+        
+        // Check if it's an ACK
+        uint16_t magic = 0;
+        std::memcpy(&magic, buffer.data(), sizeof(magic));
+        if (magic == CONTROL_MAGIC) {
+            ControlPacketHeader pkt{};
+            std::memcpy(&pkt, buffer.data(), sizeof(pkt));
+            if (pkt.msg.type == ControlMessageType::ACK) {
+                return true;  // Successfully received ACK
+            }
+        }
+        // Not an ACK - this shouldn't happen in normal operation
+        // but continue waiting in case of spurious packets
+    }
+}
+
 
 void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, const std::string &prompt,
               const int steps) {
@@ -111,6 +155,167 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, cons
             } else {
                 read_stdin("User (or exit): ", user_prompt_str);
                 if (user_prompt_str == "exit") break;
+
+                // Handle slash commands
+                if (!user_prompt_str.empty() && user_prompt_str[0] == '/') {
+                    std::istringstream iss(user_prompt_str);
+                    std::string cmd;
+                    iss >> cmd;
+
+                    if (cmd == "/layers") {
+                        // Show current layer configuration
+                        std::cout << "Current layer config:\n";
+                        if (transformer->dist_config.mode == DistributedMode::Master) {
+                            std::cout << "  Role: Master\n";
+                            std::cout << "  Master layers: 0 to " << transformer->dist_config.split_layer - 1 << "\n";
+                            std::cout << "  Worker start layer: " << transformer->dist_config.split_layer << "\n";
+                        } else if (transformer->dist_config.mode == DistributedMode::Worker) {
+                            std::cout << "  Role: Worker\n";
+                            std::cout << "  Processing layers: " << transformer->dist_config.split_layer 
+                                      << " to " << transformer->dist_config.end_layer - 1 << "\n";
+                        } else {
+                            std::cout << "  Role: Single (no distribution)\n";
+                            std::cout << "  Processing all " << transformer->config.n_layers << " layers\n";
+                        }
+                        continue;
+                    } else if (cmd == "/resize") {
+                        // Check if running in single mode (no workers)
+                        if (transformer->dist_config.mode == DistributedMode::Single) {
+                            std::cerr << "Error: /resize is only available in distributed mode (master/worker)\n";
+                            std::cerr << "  Start with --role master to enable layer resizing\n";
+                            continue;
+                        }
+                        
+                        if (!transformer->dist_config.transport) {
+                            std::cerr << "Error: No transport available. Cannot resize without worker connection.\n";
+                            continue;
+                        }
+                        
+                        // Parse all layer boundaries
+                        std::vector<int> boundaries;
+                        int boundary;
+                        while (iss >> boundary) {
+                            boundaries.push_back(boundary);
+                        }
+                        
+                        if (boundaries.empty()) {
+                            std::cerr << "Usage: /resize <layer_boundaries...>\n";
+                            std::cerr << "  Single worker:  /resize 8 16    (master:0-7, worker:8-15)\n";
+                            std::cerr << "  Multi-worker:   /resize 8 12 16 (master:0-7, w0:8-11, w1:12-15)\n";
+                            continue;
+                        }
+                        
+                        int n_layers = transformer->config.n_layers;
+                        int num_boundaries = static_cast<int>(boundaries.size());
+                        
+                        // Validate boundaries are increasing and within range
+                        bool valid = true;
+                        int prev = 0;
+                        for (int i = 0; i < num_boundaries && valid; i++) {
+                            if (boundaries[i] <= prev || boundaries[i] > n_layers) {
+                                std::cerr << "Error: Boundaries must be increasing and <= " << n_layers << "\n";
+                                valid = false;
+                            }
+                            prev = boundaries[i];
+                        }
+                        if (!valid) continue;
+                        
+                        // Update master's split_layer
+                        transformer->dist_config.split_layer = boundaries[0];
+                        
+                        if (num_boundaries == 1) {
+                            // Single boundary: just update master, worker keeps same end_layer
+                            ControlMessage msg{};
+                            msg.type = ControlMessageType::RESIZE_LAYERS;
+                            msg.split_layer = boundaries[0];
+                            msg.end_layer = n_layers;  // Worker goes to end
+                            msg.is_tail = true;
+                            transformer->dist_config.transport->send_control(msg);
+                            
+                            // Wait for ACK from worker to ensure resize is applied
+                            if (wait_for_resize_ack(transformer->dist_config.transport)) {
+                                std::cout << "Resize complete (ACK received).\n";
+                            }
+                            std::cout << "  Master: layers 0 to " << boundaries[0] - 1 << "\n";
+                            std::cout << "  Worker: layers " << boundaries[0] << " to " << n_layers - 1 << " (tail)\n";
+                        } else if (num_boundaries == 2) {
+                            // Two boundaries: single worker with explicit end
+                            ControlMessage msg{};
+                            msg.type = ControlMessageType::RESIZE_LAYERS;
+                            msg.split_layer = boundaries[0];
+                            msg.end_layer = boundaries[1];
+                            msg.is_tail = (boundaries[1] == n_layers);
+                            transformer->dist_config.transport->send_control(msg);
+                            
+                            // Wait for ACK from worker
+                            if (wait_for_resize_ack(transformer->dist_config.transport)) {
+                                std::cout << "Resize complete (ACK received).\n";
+                            }
+                            std::cout << "  Master: layers 0 to " << boundaries[0] - 1 << "\n";
+                            std::cout << "  Worker: layers " << boundaries[0] << " to " << boundaries[1] - 1;
+                            if (msg.is_tail) std::cout << " (tail)";
+                            std::cout << "\n";
+                        } else {
+                            // Multiple boundaries: multi-worker chain resize
+                            int num_workers = num_boundaries - 1;
+                            
+                            if (num_workers > MAX_WORKERS) {
+                                std::cerr << "Error: Maximum " << MAX_WORKERS << " workers supported\n";
+                                continue;
+                            }
+                            
+                            ControlMessage msg{};
+                            msg.type = ControlMessageType::RESIZE_CHAIN;
+                            msg.worker_index = 0;
+                            msg.total_workers = num_workers;
+                            
+                            int start = boundaries[0];
+                            for (int i = 0; i < num_workers; i++) {
+                                msg.ranges[i].start_layer = start;
+                                msg.ranges[i].end_layer = boundaries[i + 1];
+                                msg.ranges[i].is_tail = (boundaries[i + 1] == n_layers);
+                                start = boundaries[i + 1];
+                            }
+                            
+                            transformer->dist_config.transport->send_control(msg);
+                            
+                            // Wait for ACK from tail worker (propagates through entire chain)
+                            if (wait_for_resize_ack(transformer->dist_config.transport)) {
+                                std::cout << "Chain resize complete (ACK received).\n";
+                            }
+                            std::cout << "  Master: layers 0 to " << boundaries[0] - 1 << "\n";
+                            start = boundaries[0];
+                            for (int i = 0; i < num_workers; i++) {
+                                std::cout << "  Worker " << i << ": layers " << start 
+                                          << " to " << boundaries[i + 1] - 1;
+                                if (boundaries[i + 1] == n_layers) std::cout << " (tail)";
+                                std::cout << "\n";
+                                start = boundaries[i + 1];
+                            }
+                        }
+                        
+                        // CRITICAL: Clear KV cache and reset conversation state after resize
+                        // KV cache state cannot be transferred between nodes when layers are redistributed
+                        transformer->clear_kv_cache();
+                        pos = 0;
+                        prompt_tokens.clear();
+                        std::cout << "\n[Context reset - conversation restarted after layer redistribution]\n";
+                        
+                        continue;
+                    } else if (cmd == "/help") {
+                        std::cout << "Available commands:\n";
+                        std::cout << "  /layers           - Show current layer distribution\n";
+                        std::cout << "  /resize <...>     - Resize layer distribution\n";
+                        std::cout << "                      Single worker: /resize 8 16\n";
+                        std::cout << "                      Multi-worker:  /resize 8 12 16\n";
+                        std::cout << "  /help             - Show this help\n";
+                        std::cout << "  exit              - Exit chat\n";
+                        continue;
+                    } else {
+                        std::cerr << "Unknown command: " << cmd << ". Type /help for available commands.\n";
+                        continue;
+                    }
+                }
             }
 
             std::vector<int> usr_tokens;
@@ -268,6 +473,12 @@ int main(int argc, char *argv[]) {
         dist_config.is_tail = (end == transformer->config.n_layers);
 
         transformer->set_distributed_config(dist_config);
+        
+        // Set packet size on transport for properly padded control messages
+        if (transport) {
+            size_t packet_size = sizeof(PacketHeader) + transformer->config.dim * sizeof(float);
+            transport->set_packet_size(packet_size);
+        }
 
         if (dist_role == DistributedMode::Worker) {
             transformer->worker_loop();

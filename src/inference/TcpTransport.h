@@ -29,6 +29,10 @@ namespace Inference {
 
         void send_multipart_next(const void *header, size_t header_size, const void *data, size_t data_size) override;
 
+        // Control channel for dynamic layer resizing
+        void send_control(const ControlMessage &msg) override;
+        bool recv_control_nonblocking(ControlMessage &msg) override;
+
     private:
         std::string ip;
         int port;

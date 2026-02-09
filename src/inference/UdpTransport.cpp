@@ -7,6 +7,7 @@
 #include <iostream>
 #include <cstring>
 #include <algorithm>
+#include <poll.h>
 
 namespace Inference {
     UdpTransport::UdpTransport(std::string ip, const int port, std::string next_ip, int next_port)
@@ -226,5 +227,33 @@ namespace Inference {
             received_chunks[chunk] = true;
             chunks_count++;
         }
+    }
+
+    void UdpTransport::send_control(const ControlMessage &msg) {
+        if (next_addr.sin_family == 0) throw std::runtime_error("Next address not configured for control");
+
+        // For UDP, use the same chunked protocol as data packets to ensure ordering.
+        // Control messages are padded to packet_size_ and sent via send_next, which
+        // uses the leap_header chunking. Workers will detect them inline via CONTROL_MAGIC.
+        ControlPacketHeader pkt{CONTROL_MAGIC, msg};
+        
+        if (packet_size_ > 0 && packet_size_ >= sizeof(pkt)) {
+            // Pad to full packet size and send through chunking protocol
+            std::vector<char> buffer(packet_size_, 0);
+            std::memcpy(buffer.data(), &pkt, sizeof(pkt));
+            send_next(buffer.data(), buffer.size());
+        } else {
+            // Fallback: send raw (may not work reliably)
+            send_next(&pkt, sizeof(pkt));
+        }
+    }
+
+    bool UdpTransport::recv_control_nonblocking(ControlMessage &msg) {
+        // Control messages are now sent via the chunked protocol (send_next) for ordering.
+        // They will be received through recv_prev and detected inline in worker_loop
+        // by checking for CONTROL_MAGIC at the start of the received packet.
+        // Non-blocking control receive is not needed/supported with this approach.
+        (void)msg;
+        return false;
     }
 }

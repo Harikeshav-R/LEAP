@@ -71,6 +71,11 @@ namespace Inference {
         }
     }
 
+    void FloatTransformer::clear_kv_cache() {
+        std::memset(state.key_cache.data(), 0, state.key_cache.size() * sizeof(float));
+        std::memset(state.value_cache.data(), 0, state.value_cache.size() * sizeof(float));
+    }
+
     void FloatTransformer::rmsnorm(float *__restrict__ o, const float *__restrict__ x, const float *__restrict__ weight,
                                    const int size) {
         float ss = 0.0f;
@@ -209,13 +214,24 @@ namespace Inference {
     }
 
     void FloatTransformer::softmax(float *x, const int size) {
-        const float max_val = *std::max_element(x, x + size);
+        // Find max for numerical stability
+        float max_val = x[0];
+#pragma omp parallel for reduction(max:max_val)
+        for (int i = 1; i < size; i++) {
+            if (x[i] > max_val) max_val = x[i];
+        }
+        
+        // Exp and sum
         float sum = 0.0f;
+#pragma omp parallel for reduction(+:sum)
         for (int i = 0; i < size; i++) {
             x[i] = std::exp(x[i] - max_val);
             sum += x[i];
         }
+        
+        // Normalize
         const float inv_sum = 1.0f / sum;
+#pragma omp parallel for
         for (int i = 0; i < size; i++) {
             x[i] *= inv_sum;
         }
@@ -477,6 +493,9 @@ namespace Inference {
             }
         }
 
+        // Precompute attention scale factor (moved out of inner loops for efficiency)
+        const float att_scale = 1.0f / std::sqrt(static_cast<float>(head_size));
+
         int h;
 #pragma omp parallel for private(h)
         for (h = 0; h < p->n_heads; h++) {
@@ -484,12 +503,20 @@ namespace Inference {
             float *att = s->att.data() + h * p->seq_len;
             int t = 0;
 
-            // Unrolled loop for t
+            // Unrolled loop for t with prefetching
             for (; t <= pos - 4; t += 4) {
                 const float *k0 = s->key_cache.data() + loff + t * kv_dim + (h / kv_mul) * head_size;
                 const float *k1 = s->key_cache.data() + loff + (t + 1) * kv_dim + (h / kv_mul) * head_size;
                 const float *k2 = s->key_cache.data() + loff + (t + 2) * kv_dim + (h / kv_mul) * head_size;
                 const float *k3 = s->key_cache.data() + loff + (t + 3) * kv_dim + (h / kv_mul) * head_size;
+                
+                // Prefetch next batch of key vectors
+                if (t + 4 <= pos - 4) {
+                    __builtin_prefetch(s->key_cache.data() + loff + (t + 4) * kv_dim + (h / kv_mul) * head_size, 0, 0);
+                    __builtin_prefetch(s->key_cache.data() + loff + (t + 5) * kv_dim + (h / kv_mul) * head_size, 0, 0);
+                    __builtin_prefetch(s->key_cache.data() + loff + (t + 6) * kv_dim + (h / kv_mul) * head_size, 0, 0);
+                    __builtin_prefetch(s->key_cache.data() + loff + (t + 7) * kv_dim + (h / kv_mul) * head_size, 0, 0);
+                }
 
                 float s0 = 0.0f;
                 float s1 = 0.0f;
@@ -558,11 +585,10 @@ namespace Inference {
                     s3 += qv * k3[i];
                 }
 
-                float scale = 1.0f / std::sqrt(static_cast<float>(head_size));
-                att[t] = s0 * scale;
-                att[t + 1] = s1 * scale;
-                att[t + 2] = s2 * scale;
-                att[t + 3] = s3 * scale;
+                att[t] = s0 * att_scale;
+                att[t + 1] = s1 * att_scale;
+                att[t + 2] = s2 * att_scale;
+                att[t + 3] = s3 * att_scale;
             }
 
             // Tail loop
@@ -600,14 +626,13 @@ namespace Inference {
                 for (; i < head_size; i++) {
                     score += q[i] * k_ptr[i];
                 }
-                score /= std::sqrt(static_cast<float>(head_size));
-                att[t] = score;
+                att[t] = score * att_scale;
             }
 
             softmax(att, pos + 1);
 
             float *xb = s->xb.data() + h * head_size;
-            std::fill_n(xb, head_size, 0.0f);
+            std::memset(xb, 0, head_size * sizeof(float));
 
             for (int t = 0; t <= pos; t++) {
                 const float *v_ptr = s->value_cache.data() + loff + t * kv_dim + (h / kv_mul) * head_size;
@@ -638,7 +663,22 @@ namespace Inference {
 
         matmul(s->xb2.data(), s->xb.data(), w->wo + l * dim * dim, dim, dim);
 
-        for (int i = 0; i < dim; i++) {
+        // Vectorized residual connection
+        int i = 0;
+#if defined(__ARM_NEON)
+        for (; i <= dim - 4; i += 4) {
+            float32x4_t x_vec = vld1q_f32(x + i);
+            float32x4_t xb2_vec = vld1q_f32(s->xb2.data() + i);
+            vst1q_f32(x + i, vaddq_f32(x_vec, xb2_vec));
+        }
+#elif defined(__AVX2__)
+        for (; i <= dim - 8; i += 8) {
+            __m256 x_vec = _mm256_loadu_ps(x + i);
+            __m256 xb2_vec = _mm256_loadu_ps(s->xb2.data() + i);
+            _mm256_storeu_ps(x + i, _mm256_add_ps(x_vec, xb2_vec));
+        }
+#endif
+        for (; i < dim; i++) {
             x[i] += s->xb2[i];
         }
 
@@ -647,17 +687,63 @@ namespace Inference {
         matmul(s->hb.data(), s->xb.data(), w->w1 + l * dim * hidden_dim, dim, hidden_dim);
         matmul(s->hb2.data(), s->xb.data(), w->w3 + l * dim * hidden_dim, dim, hidden_dim);
 
-#pragma omp parallel for simd
-        for (int i = 0; i < hidden_dim; i++) {
-            float val = s->hb[i];
-            val *= (1.0f / (1.0f + std::exp(-val))); // Silu
-            val *= s->hb2[i];
-            s->hb[i] = val;
+        // SiLU activation with explicit SIMD
+        int ii = 0;
+#if defined(__ARM_NEON)
+        for (; ii <= hidden_dim - 4; ii += 4) {
+            float32x4_t val = vld1q_f32(s->hb.data() + ii);
+            float32x4_t hb2_vec = vld1q_f32(s->hb2.data() + ii);
+            // Compute sigmoid: 1 / (1 + exp(-val))
+            // Using approximation for NEON
+            float tmp[4];
+            vst1q_f32(tmp, val);
+            tmp[0] = 1.0f / (1.0f + std::exp(-tmp[0]));
+            tmp[1] = 1.0f / (1.0f + std::exp(-tmp[1]));
+            tmp[2] = 1.0f / (1.0f + std::exp(-tmp[2]));
+            tmp[3] = 1.0f / (1.0f + std::exp(-tmp[3]));
+            float32x4_t sigmoid = vld1q_f32(tmp);
+            float32x4_t result = vmulq_f32(vmulq_f32(val, sigmoid), hb2_vec);
+            vst1q_f32(s->hb.data() + ii, result);
         }
-
+#elif defined(__AVX2__)
+        for (; ii <= hidden_dim - 8; ii += 8) {
+            __m256 val = _mm256_loadu_ps(s->hb.data() + ii);
+            __m256 hb2_vec = _mm256_loadu_ps(s->hb2.data() + ii);
+            // Scalar sigmoid computation (exp is not vectorized in AVX2 without libmvec)
+            float tmp[8], sig[8];
+            _mm256_storeu_ps(tmp, val);
+            for (int k = 0; k < 8; k++) {
+                sig[k] = 1.0f / (1.0f + std::exp(-tmp[k]));
+            }
+            __m256 sigmoid = _mm256_loadu_ps(sig);
+            __m256 result = _mm256_mul_ps(_mm256_mul_ps(val, sigmoid), hb2_vec);
+            _mm256_storeu_ps(s->hb.data() + ii, result);
+        }
+#endif
+        for (; ii < hidden_dim; ii++) {
+            float val = s->hb[ii];
+            val *= (1.0f / (1.0f + std::exp(-val))); // SiLU
+            val *= s->hb2[ii];
+            s->hb[ii] = val;
+        }
         matmul(s->xb.data(), s->hb.data(), w->w2 + l * dim * hidden_dim, hidden_dim, dim);
 
-        for (int i = 0; i < dim; i++) {
+        // Vectorized residual connection
+        i = 0;
+#if defined(__ARM_NEON)
+        for (; i <= dim - 4; i += 4) {
+            float32x4_t x_vec = vld1q_f32(x + i);
+            float32x4_t xb_vec = vld1q_f32(s->xb.data() + i);
+            vst1q_f32(x + i, vaddq_f32(x_vec, xb_vec));
+        }
+#elif defined(__AVX2__)
+        for (; i <= dim - 8; i += 8) {
+            __m256 x_vec = _mm256_loadu_ps(x + i);
+            __m256 xb_vec = _mm256_loadu_ps(s->xb.data() + i);
+            _mm256_storeu_ps(x + i, _mm256_add_ps(x_vec, xb_vec));
+        }
+#endif
+        for (; i < dim; i++) {
             x[i] += s->xb[i];
         }
     }
@@ -717,18 +803,124 @@ namespace Inference {
         const int dim = config.dim;
         PacketHeader header{};
 
-        const int start_layer = dist_config.split_layer;
+        int start_layer = dist_config.split_layer;
 
         const size_t packet_size = sizeof(PacketHeader) + dim * sizeof(float);
         if (transfer_buffer.size() < packet_size) transfer_buffer.resize(packet_size);
+        
+        // Set packet size on transport for properly padded control messages
+        dist_config.transport->set_packet_size(packet_size);
 
         std::cout << "Worker started. Processing layers " << start_layer << " to " << dist_config.end_layer - 1 <<
                 std::endl;
 
         while (true) {
             try {
+                // Check for control messages (non-blocking)
+                ControlMessage ctrl_msg{};
+                if (dist_config.transport->recv_control_nonblocking(ctrl_msg)) {
+                    if (ctrl_msg.type == ControlMessageType::RESIZE_LAYERS) {
+                        update_layer_config(ctrl_msg);
+                        start_layer = dist_config.split_layer;
+                        std::cout << "Worker: Layer config updated. Now processing layers "
+                                  << start_layer << " to " << dist_config.end_layer - 1 << std::endl;
+                        
+                        // Send ACK back (optional, for confirmation)
+                        ControlMessage ack{};
+                        ack.type = ControlMessageType::ACK;
+                        ack.split_layer = start_layer;
+                        ack.end_layer = dist_config.end_layer;
+                        ack.is_tail = dist_config.is_tail;
+                        dist_config.transport->send_control(ack);
+                    } else if (ctrl_msg.type == ControlMessageType::RESIZE_CHAIN) {
+                        // Multi-worker chain resize: apply our config and forward
+                        int my_idx = ctrl_msg.worker_index;
+                        if (my_idx >= 0 && my_idx < ctrl_msg.total_workers) {
+                            dist_config.split_layer = ctrl_msg.ranges[my_idx].start_layer;
+                            dist_config.end_layer = ctrl_msg.ranges[my_idx].end_layer;
+                            dist_config.is_tail = ctrl_msg.ranges[my_idx].is_tail;
+                            start_layer = dist_config.split_layer;
+                            
+                            std::cout << "Worker " << my_idx << ": Layer config updated. Now processing layers "
+                                      << start_layer << " to " << dist_config.end_layer - 1 
+                                      << (dist_config.is_tail ? " (tail)" : "") << std::endl;
+                        }
+                        
+                        // Forward to next worker if there are more workers
+                        if (my_idx + 1 < ctrl_msg.total_workers) {
+                            ctrl_msg.worker_index = my_idx + 1;  // Increment for next worker
+                            dist_config.transport->send_control(ctrl_msg);
+                        } else {
+                            // This is the last worker - send ACK back through the ring
+                            ControlMessage ack{};
+                            ack.type = ControlMessageType::ACK;
+                            ack.split_layer = start_layer;
+                            ack.end_layer = dist_config.end_layer;
+                            ack.is_tail = dist_config.is_tail;
+                            dist_config.transport->send_control(ack);
+                        }
+                    } else if (ctrl_msg.type == ControlMessageType::ACK) {
+                        // Forward ACK to next node (back to master)
+                        dist_config.transport->send_control(ctrl_msg);
+                    }
+                }
+
                 // Receive header + data from Prev
                 dist_config.transport->recv_prev(transfer_buffer.data(), packet_size);
+
+                // Check if this is actually a control message (for inline control on kernel transport)
+                uint16_t magic = 0;
+                std::memcpy(&magic, transfer_buffer.data(), sizeof(magic));
+                if (magic == CONTROL_MAGIC) {
+                    ControlPacketHeader ctrl_pkt{};
+                    std::memcpy(&ctrl_pkt, transfer_buffer.data(), sizeof(ctrl_pkt));
+                    if (ctrl_pkt.msg.type == ControlMessageType::RESIZE_LAYERS) {
+                        update_layer_config(ctrl_pkt.msg);
+                        start_layer = dist_config.split_layer;
+                        std::cout << "Worker: Layer config updated (inline). Now processing layers "
+                                  << start_layer << " to " << dist_config.end_layer - 1 << std::endl;
+                        
+                        // Send ACK back
+                        ControlMessage ack{};
+                        ack.type = ControlMessageType::ACK;
+                        ack.split_layer = start_layer;
+                        ack.end_layer = dist_config.end_layer;
+                        ack.is_tail = dist_config.is_tail;
+                        dist_config.transport->send_control(ack);
+                    } else if (ctrl_pkt.msg.type == ControlMessageType::RESIZE_CHAIN) {
+                        // Multi-worker chain resize (inline)
+                        int my_idx = ctrl_pkt.msg.worker_index;
+                        if (my_idx >= 0 && my_idx < ctrl_pkt.msg.total_workers) {
+                            dist_config.split_layer = ctrl_pkt.msg.ranges[my_idx].start_layer;
+                            dist_config.end_layer = ctrl_pkt.msg.ranges[my_idx].end_layer;
+                            dist_config.is_tail = ctrl_pkt.msg.ranges[my_idx].is_tail;
+                            start_layer = dist_config.split_layer;
+                            
+                            std::cout << "Worker " << my_idx << ": Layer config updated (inline). Now processing layers "
+                                      << start_layer << " to " << dist_config.end_layer - 1 
+                                      << (dist_config.is_tail ? " (tail)" : "") << std::endl;
+                        }
+                        
+                        // Forward to next worker if there are more workers
+                        if (my_idx + 1 < ctrl_pkt.msg.total_workers) {
+                            ControlMessage fwd = ctrl_pkt.msg;
+                            fwd.worker_index = my_idx + 1;
+                            dist_config.transport->send_control(fwd);
+                        } else {
+                            // This is the last worker - send ACK back through the ring
+                            ControlMessage ack{};
+                            ack.type = ControlMessageType::ACK;
+                            ack.split_layer = start_layer;
+                            ack.end_layer = dist_config.end_layer;
+                            ack.is_tail = dist_config.is_tail;
+                            dist_config.transport->send_control(ack);
+                        }
+                    } else if (ctrl_pkt.msg.type == ControlMessageType::ACK) {
+                        // Forward ACK to next node (back to master)
+                        dist_config.transport->send_control(ctrl_pkt.msg);
+                    }
+                    continue;  // Skip normal processing for control packets
+                }
 
                 std::memcpy(&header, transfer_buffer.data(), sizeof(PacketHeader));
                 std::memcpy(x, transfer_buffer.data() + sizeof(PacketHeader), dim * sizeof(float));

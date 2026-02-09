@@ -7,6 +7,7 @@
 #include <iostream>
 #include <cstring>
 #include <sys/uio.h> // For writev
+#include <poll.h>    // For non-blocking control recv
 
 namespace Inference {
     TcpTransport::TcpTransport(std::string ip, const int port, std::string next_ip, const int next_port)
@@ -178,5 +179,62 @@ namespace Inference {
             if (received == 0) throw std::runtime_error("Prev node disconnected");
             total_received += received;
         }
+    }
+
+    void TcpTransport::send_control(const ControlMessage &msg) {
+        if (egress_fd == -1) throw std::runtime_error("No next node connected for control");
+        ControlPacketHeader pkt{CONTROL_MAGIC, msg};
+        
+        // Use packet_size_ padding if set, otherwise send raw (for compat)
+        size_t send_size = (packet_size_ > 0 && packet_size_ >= sizeof(pkt)) ? packet_size_ : sizeof(pkt);
+        std::vector<char> buffer(send_size, 0);
+        std::memcpy(buffer.data(), &pkt, sizeof(pkt));
+        
+        size_t total_sent = 0;
+        while (total_sent < send_size) {
+            const ssize_t sent = ::send(egress_fd, buffer.data() + total_sent, send_size - total_sent, 0);
+            if (sent < 0) throw std::runtime_error("Send control failed");
+            total_sent += sent;
+        }
+    }
+
+    bool TcpTransport::recv_control_nonblocking(ControlMessage &msg) {
+        if (ingress_fd == -1) return false;
+
+        // Use poll to check if data is available without blocking
+        struct pollfd pfd{};
+        pfd.fd = ingress_fd;
+        pfd.events = POLLIN;
+
+        int ret = poll(&pfd, 1, 0);  // 0 timeout = non-blocking
+        if (ret <= 0) return false;
+
+        // Peek at the first 2 bytes to check for control magic
+        uint16_t magic = 0;
+        ssize_t peeked = ::recv(ingress_fd, &magic, sizeof(magic), MSG_PEEK);
+        if (peeked < static_cast<ssize_t>(sizeof(magic))) return false;
+
+        if (magic != CONTROL_MAGIC) return false;
+
+        // It's a control packet - must read the FULL padded packet to keep stream in sync
+        // send_control pads to packet_size_, so we must consume that many bytes
+        size_t recv_size = (packet_size_ > 0 && packet_size_ >= sizeof(ControlPacketHeader)) 
+                           ? packet_size_ 
+                           : sizeof(ControlPacketHeader);
+        
+        std::vector<char> buffer(recv_size);
+        size_t total_received = 0;
+        while (total_received < recv_size) {
+            const ssize_t received = ::recv(ingress_fd, buffer.data() + total_received, 
+                                            recv_size - total_received, 0);
+            if (received <= 0) return false;
+            total_received += received;
+        }
+
+        // Extract the control packet header from the buffer
+        ControlPacketHeader pkt{};
+        std::memcpy(&pkt, buffer.data(), sizeof(pkt));
+        msg = pkt.msg;
+        return true;
     }
 } // namespace Inference

@@ -97,14 +97,14 @@ Run 100/100... Done (49.05 tok/s)
 ============================================================
 METRIC          | MEAN       | MEDIAN     | MIN        | MAX        | STD DEV   
 ---------------------------------------------------------------------------
-Throughput      | 48.50      | 48.45      | 45.20      | 51.10      | 1.25      
+Throughput (tok/s) | 48.50      | 48.45      | 45.20      | 51.10      | 1.25      
 Latency (s)     | 2.06       | 2.07       | 1.95       | 2.21       | 0.05      
 ============================================================
 Detailed Latency P95: 2.15 s
 ```
 
--   **Throughput**: Tokens per second (Higher is better).
--   **Latency**: Total time to generate the requested number of tokens (Lower is better).
+-   **Throughput**: Tokens per second (tok/s) (Higher is better).
+-   **Latency**: Total time to generate the requested number of tokens (seconds) (Lower is better).
 -   **Std Dev**: Lower indicates more stable performance.
 
 ## Notes

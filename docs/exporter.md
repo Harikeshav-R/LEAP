@@ -100,8 +100,8 @@ Offset 0x100:  Weights start (256-byte aligned)
   - `float` — Scale factor per block
 
 **What Gets Quantized:**
-- ✅ All weight matrices (Q, K, V, O, W1, W2, W3, embeddings, output)
-- ❌ Normalization weights (RMSNorm) — kept in FP32 for numerical stability
+- All weight matrices (Q, K, V, O, W1, W2, W3, embeddings, output)
+- Normalization weights (RMSNorm) — kept in FP32 for numerical stability
 
 **Pipeline Optimization:**
 The INT8 export uses a **lookahead pipeline**:

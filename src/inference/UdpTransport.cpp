@@ -106,8 +106,6 @@ namespace Inference {
         while (segment_offset < size) {
             const size_t segment_size = std::min(size - segment_offset, static_cast<size_t>(LEAP_RX_BANK_SIZE));
             const uint16_t total_chunks = (segment_size + LEAP_CHUNK_SIZE - 1) / LEAP_CHUNK_SIZE;
-            uint16_t chunk_idx = 0;
-            size_t processed = 0;
 
             seq_id++;
 
@@ -115,42 +113,58 @@ namespace Inference {
                     seq_id, total_chunks, segment_size,
                     inet_ntoa(next_addr.sin_addr), ntohs(next_addr.sin_port));
 
-            while (processed < segment_size) {
-                size_t chunk_len = std::min(segment_size - processed, static_cast<size_t>(LEAP_CHUNK_SIZE));
+            // Lambda: send one pass of all chunks for this segment
+            auto send_pass = [&]() {
+                uint16_t chunk_idx = 0;
+                size_t processed = 0;
+                while (processed < segment_size) {
+                    size_t chunk_len = std::min(segment_size - processed, static_cast<size_t>(LEAP_CHUNK_SIZE));
 
-                hdr->magic = htonl(LEAP_MAGIC);
-                hdr->seq_id = htons(seq_id);
-                hdr->chunk_id = htons(chunk_idx);
-                hdr->total_chunks = htons(total_chunks);
+                    hdr->magic = htonl(LEAP_MAGIC);
+                    hdr->seq_id = htons(seq_id);
+                    hdr->chunk_id = htons(chunk_idx);
+                    hdr->total_chunks = htons(total_chunks);
 
-                struct iovec iov[2];
-                iov[0].iov_base = packet_buffer.data();
-                iov[0].iov_len = sizeof(leap_header);
-                iov[1].iov_base = const_cast<uint8_t *>(bytes + segment_offset + processed);
-                iov[1].iov_len = chunk_len;
+                    struct iovec iov[2];
+                    iov[0].iov_base = packet_buffer.data();
+                    iov[0].iov_len = sizeof(leap_header);
+                    iov[1].iov_base = const_cast<uint8_t *>(bytes + segment_offset + processed);
+                    iov[1].iov_len = chunk_len;
 
-                struct msghdr msg{};
-                msg.msg_name = &next_addr;
-                msg.msg_namelen = sizeof(next_addr);
-                msg.msg_iov = iov;
-                msg.msg_iovlen = 2;
+                    struct msghdr msg{};
+                    msg.msg_name = &next_addr;
+                    msg.msg_namelen = sizeof(next_addr);
+                    msg.msg_iov = iov;
+                    msg.msg_iovlen = 2;
 
-                if (sendmsg(sockfd, &msg, 0) < 0) throw std::runtime_error("UDP send next failed");
+                    if (sendmsg(sockfd, &msg, 0) < 0) throw std::runtime_error("UDP send next failed");
 
-                processed += chunk_len;
-                chunk_idx++;
+                    processed += chunk_len;
+                    chunk_idx++;
 
-                // Pacing: brief pause between chunks to prevent receiver socket buffer
-                // overflow. Virtual NICs (Mac host to Linux VM) are especially prone
-                // to dropping back-to-back UDP packets.
-                if (total_chunks > 1) {
-                    if (total_chunks > 32 && chunk_idx % 32 == 0) {
-                        usleep(200);   // Longer pause for large transfers
-                    } else {
-                        usleep(50);    // 50μs between chunks — negligible latency, prevents drops
+                    // Pacing between chunks
+                    if (total_chunks > 1 && chunk_idx < total_chunks) {
+                        if (total_chunks > 32 && chunk_idx % 32 == 0) {
+                            usleep(200);
+                        } else {
+                            usleep(50);
+                        }
                     }
                 }
+            };
+
+            // Pass 1: initial send
+            send_pass();
+
+            // Blind retransmit: resend all chunks after a gap.
+            // The receiver deduplicates via received_chunks[], so duplicates are harmless.
+            // This handles intermittent virtual NIC packet loss where entire bursts
+            // can be dropped by the host→VM bridge.
+            if (total_chunks > 1) {
+                usleep(1000);  // 1ms gap between passes
+                send_pass();
             }
+
             segment_offset += segment_size;
         }
     }

@@ -102,6 +102,12 @@ namespace Inference {
 
             processed += chunk_len;
             chunk_idx++;
+
+            // Pacing: brief pause every 32 chunks to prevent receiver socket buffer
+            // overflow during large transfers (e.g., KV cache with thousands of chunks).
+            if (total_chunks > 32 && chunk_idx % 32 == 0) {
+                usleep(100);
+            }
         }
     }
 
@@ -165,6 +171,11 @@ namespace Inference {
 
             processed += chunk_len;
             chunk_idx++;
+
+            // Pacing: same as send_next — prevent receiver buffer overflow
+            if (total_chunks > 32 && chunk_idx % 32 == 0) {
+                usleep(100);
+            }
         }
     }
 
@@ -183,12 +194,30 @@ namespace Inference {
         auto *out_bytes = static_cast<uint8_t *>(data);
         int32_t active_seq_id = -1;
 
+        // Use poll-based timeout to prevent hanging forever on lost packets.
+        // For single-chunk receives (normal inference), the first poll is generous.
+        // For multi-chunk receives (KV transfer), use a per-chunk timeout.
+        constexpr int RECV_TIMEOUT_MS = 10000;  // 10s total timeout for stalled receives
+
         while (chunks_count < expected_chunks) {
             sockaddr_in src_addr{};
             socklen_t addr_len = sizeof(src_addr);
 
             // Reuse packet_buffer for receive
             if (packet_buffer.size() < 2048) packet_buffer.resize(2048);
+
+            // Poll with timeout to detect stalled transfers
+            struct pollfd pfd{};
+            pfd.fd = sockfd;
+            pfd.events = POLLIN;
+            int poll_ret = poll(&pfd, 1, RECV_TIMEOUT_MS);
+            if (poll_ret == 0) {
+                // Timeout: no data received for RECV_TIMEOUT_MS
+                throw std::runtime_error("UDP recv_prev timeout: received " + 
+                    std::to_string(chunks_count) + "/" + std::to_string(expected_chunks) + 
+                    " chunks (" + std::to_string(size) + " bytes expected)");
+            }
+            if (poll_ret < 0) throw std::runtime_error("UDP poll failed");
 
             const ssize_t len = recvfrom(sockfd, packet_buffer.data(), packet_buffer.size(), 0,
                                          reinterpret_cast<struct sockaddr *>(&src_addr), &addr_len);

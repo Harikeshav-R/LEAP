@@ -279,7 +279,7 @@ To ensure LEAP performs efficiently across heterogeneous hardware, we benchmarke
 
 | METRIC | MEAN | MEDIAN | MIN | MAX | STD DEV |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| Throughput | 22.20 | 22.19 | 15.22 | 24.44 | 1.41 |
+| Throughput (tok/s) | 22.20 | 22.19 | 15.22 | 24.44 | 1.41 |
 | Latency (s) | 2.47 | 2.45 | 2.24 | 3.49 | 0.17 |
 
 ### 2. UDP Transport (User-Space)
@@ -287,7 +287,7 @@ To ensure LEAP performs efficiently across heterogeneous hardware, we benchmarke
 
 | METRIC | MEAN | MEDIAN | MIN | MAX | STD DEV |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| Throughput | 18.50 | 18.48 | 14.10 | 19.95 | 1.25 |
+| Throughput (tok/s) | 18.50 | 18.48 | 14.10 | 19.95 | 1.25 |
 | Latency (s) | 2.96 | 2.95 | 2.75 | 3.88 | 0.22 |
 
 ### 3. TCP Transport (Default)
@@ -295,7 +295,7 @@ To ensure LEAP performs efficiently across heterogeneous hardware, we benchmarke
 
 | METRIC | MEAN | MEDIAN | MIN | MAX | STD DEV |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| Throughput | 17.80 | 17.75 | 13.50 | 18.90 | 1.10 |
+| Throughput (tok/s) | 17.80 | 17.75 | 13.50 | 18.90 | 1.10 |
 | Latency (s) | 3.08 | 3.06 | 2.90 | 4.10 | 0.18 |
 
 > 📖 **Full Guide**: See [docs/benchmarking.md](docs/benchmarking.md) for instructions on how to replicate these tests.

@@ -46,6 +46,20 @@ namespace Inference {
         ControlMessage msg;
     } __attribute__((packed));
 
+    // KV Cache Transfer Protocol
+    constexpr uint16_t KV_TRANSFER_MAGIC = 0xCAFE;
+
+    // Maximum layers in a single model
+    constexpr int MAX_LAYERS = 128;
+
+    // Header for KV cache transfer bundles (packed for network transmission)
+    struct KvTransferHeader {
+        uint16_t magic;       // KV_TRANSFER_MAGIC
+        int32_t num_slices;   // number of layer slices in this bundle
+        int32_t pos;          // filled sequence positions (how much cache is valid)
+        int32_t kv_dim;       // KV dimension per layer
+    } __attribute__((packed));
+
     class Transport {
     protected:
         size_t packet_size_ = 0;  // Data packet size (header + dim * sizeof(float))

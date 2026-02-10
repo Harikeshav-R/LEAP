@@ -71,6 +71,9 @@ namespace Inference {
 
         void clear_kv_cache() override;
 
+        float* get_key_cache() override { return state.key_cache.data(); }
+        float* get_value_cache() override { return state.value_cache.data(); }
+
     private:
         QuantizedTransformerWeights weights{};
         QuantizedRunState state{};

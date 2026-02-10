@@ -33,6 +33,9 @@ namespace Inference {
         void send_control(const ControlMessage &msg) override;
         bool recv_control_nonblocking(ControlMessage &msg) override;
 
+        // Drain stale packets from socket buffer before control operations
+        void drain_stale_packets();
+
     private:
         std::string ip;
         int port;

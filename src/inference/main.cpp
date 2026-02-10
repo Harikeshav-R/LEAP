@@ -278,8 +278,14 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, cons
                                 start = boundaries[i + 1];
                             }
                             
+                            // Drain any stale packets from the UDP socket before control exchange
+                            auto *udp = dynamic_cast<UdpTransport *>(transformer->dist_config.transport);
+                            if (udp) udp->drain_stale_packets();
+                            
+                            std::cerr << "[Resize] Sending RESIZE_CHAIN to " << num_workers << " workers..." << std::endl;
                             transformer->dist_config.transport->send_control(msg);
                             
+                            std::cerr << "[Resize] Waiting for ACK..." << std::endl;
                             // Wait for ACK from tail worker (propagates through entire chain)
                             if (wait_for_resize_ack(transformer->dist_config.transport)) {
                                 std::cout << "Chain resize complete (ACK received).\n";

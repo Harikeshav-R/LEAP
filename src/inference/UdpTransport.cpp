@@ -9,6 +9,14 @@
 #include <algorithm>
 #include <poll.h>
 
+// Set to 1 to enable verbose UDP debug logging
+#define UDP_DEBUG 1
+#if UDP_DEBUG
+#define UDP_LOG(fmt, ...) fprintf(stderr, "[UDP] " fmt "\n", ##__VA_ARGS__)
+#else
+#define UDP_LOG(fmt, ...) ((void)0)
+#endif
+
 namespace Inference {
     UdpTransport::UdpTransport(std::string ip, const int port, std::string next_ip, int next_port)
         : ip(std::move(ip)), port(port), next_ip(std::move(next_ip)), next_port(next_port) {
@@ -54,6 +62,27 @@ namespace Inference {
         std::cout << "UDP Chain: Next node at " << next_ip << ":" << next_port << std::endl;
     }
 
+    void UdpTransport::drain_stale_packets() {
+        // Non-blocking drain of any queued packets from the socket buffer.
+        // This prevents stale packets from previous operations from interfering
+        // with the next recv_prev call.
+        int drained = 0;
+        uint8_t discard[2048];
+        while (true) {
+            struct pollfd pfd{};
+            pfd.fd = sockfd;
+            pfd.events = POLLIN;
+            int ret = poll(&pfd, 1, 0);  // Non-blocking
+            if (ret <= 0) break;
+            ssize_t len = ::recvfrom(sockfd, discard, sizeof(discard), 0, nullptr, nullptr);
+            if (len <= 0) break;
+            drained++;
+        }
+        if (drained > 0) {
+            UDP_LOG("Drained %d stale packets from socket buffer", drained);
+        }
+    }
+
     void UdpTransport::send(const void *data, const size_t size) {
         send_next(data, size);
     }
@@ -80,6 +109,10 @@ namespace Inference {
             size_t processed = 0;
 
             seq_id++;
+
+            UDP_LOG("send_next: seq=%u total_chunks=%u size=%zu to %s:%d",
+                    seq_id, total_chunks, segment_size,
+                    inet_ntoa(next_addr.sin_addr), ntohs(next_addr.sin_port));
 
             while (processed < segment_size) {
                 size_t chunk_len = std::min(segment_size - processed, static_cast<size_t>(LEAP_CHUNK_SIZE));
@@ -143,6 +176,9 @@ namespace Inference {
         // Use poll-based timeout to prevent hanging forever on lost packets.
         constexpr int RECV_TIMEOUT_MS = 10000;  // 10s total timeout for stalled receives
 
+        UDP_LOG("recv_prev: waiting for %zu bytes (%zu chunks)",
+                size, (size + LEAP_CHUNK_SIZE - 1) / LEAP_CHUNK_SIZE);
+
         // Receive in LEAP_RX_BANK_SIZE segments to match the bank-aligned
         // splitting in send_next. Each segment has its own seq_id.
         size_t total_received = 0;
@@ -152,6 +188,7 @@ namespace Inference {
             std::vector<bool> received_chunks(expected_chunks, false);
             size_t chunks_count = 0;
             int32_t active_seq_id = -1;
+            int stale_packets = 0;
 
             while (chunks_count < expected_chunks) {
                 sockaddr_in src_addr{};
@@ -167,6 +204,8 @@ namespace Inference {
                 int poll_ret = poll(&pfd, 1, RECV_TIMEOUT_MS);
                 if (poll_ret == 0) {
                     // Timeout: no data received for RECV_TIMEOUT_MS
+                    UDP_LOG("recv_prev TIMEOUT: %zu/%zu chunks, active_seq=%d, stale_dropped=%d",
+                            chunks_count, expected_chunks, active_seq_id, stale_packets);
                     throw std::runtime_error("UDP recv_prev timeout: received " + 
                         std::to_string(chunks_count) + "/" + std::to_string(expected_chunks) + 
                         " chunks (" + std::to_string(size) + " bytes expected)");
@@ -184,18 +223,49 @@ namespace Inference {
                     prev_addr_set = true;
                 }
 
-                if (static_cast<size_t>(len) < sizeof(leap_header)) continue;
+                if (static_cast<size_t>(len) < sizeof(leap_header)) {
+                    UDP_LOG("recv_prev: packet too small (%zd bytes) from %s:%d",
+                            len, inet_ntoa(src_addr.sin_addr), ntohs(src_addr.sin_port));
+                    continue;
+                }
 
                 auto *hdr = reinterpret_cast<leap_header *>(packet_buffer.data());
-                if (ntohl(hdr->magic) != LEAP_MAGIC) continue;
+                if (ntohl(hdr->magic) != LEAP_MAGIC) {
+                    UDP_LOG("recv_prev: non-LEAP packet (magic=0x%08x, len=%zd) from %s:%d",
+                            ntohl(hdr->magic), len,
+                            inet_ntoa(src_addr.sin_addr), ntohs(src_addr.sin_port));
+                    continue;
+                }
 
                 const uint16_t seq = ntohs(hdr->seq_id);
                 const uint16_t chunk = ntohs(hdr->chunk_id);
+                const uint16_t total = ntohs(hdr->total_chunks);
 
                 if (active_seq_id == -1) {
                     active_seq_id = seq;
-                } else if (seq != active_seq_id) {
-                    continue;
+                    UDP_LOG("recv_prev: locked onto seq=%u (total_chunks=%u) from %s:%d",
+                            seq, total, inet_ntoa(src_addr.sin_addr), ntohs(src_addr.sin_port));
+                } else if (seq != static_cast<uint16_t>(active_seq_id)) {
+                    // Check if this is a NEWER seq_id (sender moved on).
+                    // If so, reset and start collecting the new sequence.
+                    // This handles the case where stale packets from a previous
+                    // send are still in the buffer.
+                    auto seq_diff = static_cast<int16_t>(seq - static_cast<uint16_t>(active_seq_id));
+                    if (seq_diff > 0) {
+                        // Newer sequence - reset and start fresh
+                        UDP_LOG("recv_prev: newer seq=%u arrived (was %d), resetting (%zu chunks lost)",
+                                seq, active_seq_id, chunks_count);
+                        active_seq_id = seq;
+                        std::fill(received_chunks.begin(), received_chunks.end(), false);
+                        chunks_count = 0;
+                        // Fall through to process this chunk
+                    } else {
+                        // Older/stale sequence - discard
+                        stale_packets++;
+                        UDP_LOG("recv_prev: stale seq=%u (active=%d), dropping (stale_count=%d)",
+                                seq, active_seq_id, stale_packets);
+                        continue;
+                    }
                 }
 
                 if (chunk >= expected_chunks) continue;
@@ -210,6 +280,8 @@ namespace Inference {
                 received_chunks[chunk] = true;
                 chunks_count++;
             }
+            UDP_LOG("recv_prev: segment complete (seq=%d, %zu chunks, %d stale dropped)",
+                    active_seq_id, chunks_count, stale_packets);
             total_received += segment_size;
         }
     }
@@ -221,6 +293,9 @@ namespace Inference {
         // Control messages are padded to packet_size_ and sent via send_next, which
         // uses the leap_header chunking. Workers will detect them inline via CONTROL_MAGIC.
         ControlPacketHeader pkt{CONTROL_MAGIC, msg};
+        
+        UDP_LOG("send_control: type=%d, packet_size=%zu",
+                static_cast<int>(msg.type), packet_size_);
         
         if (packet_size_ > 0 && packet_size_ >= sizeof(pkt)) {
             // Pad to full packet size and send through chunking protocol

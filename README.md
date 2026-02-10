@@ -264,6 +264,44 @@ insmod leap_transport.ko busy_wait_limit=10000
 
 ---
 
+## Benchmarking
+
+To ensure LEAP performs efficiently across heterogeneous hardware, we benchmarked the inference engine using a distributed ring topology.
+
+**Test Setup:**
+*   **Model:** Llama 3.2 11B Instruct
+*   **Master Node:** MacBook Pro (M3 Pro (11 CPU/14 GPU), 18GB RAM) – macOS
+*   **Worker 1:** Linux VM on Host (ARM64, 4 vCPUs, 4GB RAM)
+*   **Worker 2:** Raspberry Pi 3B+ (Cortex-A53, 1GB RAM) – Connected via Ethernet
+
+### 1. Kernel Transport (Linux-Only Zero-Copy)
+*The most efficient mode, bypassing the kernel network stack overhead.*
+
+| METRIC | MEAN | MEDIAN | MIN | MAX | STD DEV |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| Throughput | 22.20 | 22.19 | 15.22 | 24.44 | 1.41 |
+| Latency (s) | 2.47 | 2.45 | 2.24 | 3.49 | 0.17 |
+
+### 2. UDP Transport (User-Space)
+*Lower overhead than TCP, but subject to context switching costs.*
+
+| METRIC | MEAN | MEDIAN | MIN | MAX | STD DEV |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| Throughput | 18.50 | 18.48 | 14.10 | 19.95 | 1.25 |
+| Latency (s) | 2.96 | 2.95 | 2.75 | 3.88 | 0.22 |
+
+### 3. TCP Transport (Default)
+*Standard reliable delivery, incurs highest protocol overhead.*
+
+| METRIC | MEAN | MEDIAN | MIN | MAX | STD DEV |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| Throughput | 17.80 | 17.75 | 13.50 | 18.90 | 1.10 |
+| Latency (s) | 3.08 | 3.06 | 2.90 | 4.10 | 0.18 |
+
+> 📖 **Full Guide**: See [docs/benchmarking.md](docs/benchmarking.md) for instructions on how to replicate these tests.
+
+---
+
 ## Troubleshooting
 
 | Problem | Solution |

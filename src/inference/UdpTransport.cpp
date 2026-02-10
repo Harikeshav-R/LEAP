@@ -63,51 +63,56 @@ namespace Inference {
     }
 
     void UdpTransport::send_next(const void *data, const size_t size) {
-        // Forward to multipart with empty header (or treat data as full payload)
-        // Just reuse the logic to avoid code duplication, but for now keep distinct for simplicity
         if (next_addr.sin_family == 0) throw std::runtime_error("Next address not configured");
 
         const auto *bytes = static_cast<const uint8_t *>(data);
-        size_t processed = 0;
-        uint16_t total_chunks = (size + LEAP_CHUNK_SIZE - 1) / LEAP_CHUNK_SIZE;
-        uint16_t chunk_idx = 0;
-
-        seq_id++;
-
         if (packet_buffer.size() < sizeof(leap_header)) packet_buffer.resize(sizeof(leap_header));
         auto *hdr = reinterpret_cast<leap_header *>(packet_buffer.data());
 
-        while (processed < size) {
-            size_t chunk_len = LEAP_CHUNK_SIZE;
-            if (processed + chunk_len > size) chunk_len = size - processed;
+        // Split large payloads into LEAP_RX_BANK_SIZE segments so each segment
+        // maps to one RX bank in the kernel module. Without this, a single seq_id
+        // with >128KB of chunks overflows a bank on kernel transport receivers.
+        size_t segment_offset = 0;
+        while (segment_offset < size) {
+            const size_t segment_size = std::min(size - segment_offset, static_cast<size_t>(LEAP_RX_BANK_SIZE));
+            const uint16_t total_chunks = (segment_size + LEAP_CHUNK_SIZE - 1) / LEAP_CHUNK_SIZE;
+            uint16_t chunk_idx = 0;
+            size_t processed = 0;
 
-            hdr->magic = htonl(LEAP_MAGIC);
-            hdr->seq_id = htons(seq_id);
-            hdr->chunk_id = htons(chunk_idx);
-            hdr->total_chunks = htons(total_chunks);
+            seq_id++;
 
-            struct iovec iov[2];
-            iov[0].iov_base = packet_buffer.data();
-            iov[0].iov_len = sizeof(leap_header);
-            iov[1].iov_base = const_cast<uint8_t *>(bytes + processed);
-            iov[1].iov_len = chunk_len;
+            while (processed < segment_size) {
+                size_t chunk_len = std::min(segment_size - processed, static_cast<size_t>(LEAP_CHUNK_SIZE));
 
-            struct msghdr msg{};
-            msg.msg_name = &next_addr;
-            msg.msg_namelen = sizeof(next_addr);
-            msg.msg_iov = iov;
-            msg.msg_iovlen = 2;
+                hdr->magic = htonl(LEAP_MAGIC);
+                hdr->seq_id = htons(seq_id);
+                hdr->chunk_id = htons(chunk_idx);
+                hdr->total_chunks = htons(total_chunks);
 
-            if (sendmsg(sockfd, &msg, 0) < 0) throw std::runtime_error("UDP send next failed");
+                struct iovec iov[2];
+                iov[0].iov_base = packet_buffer.data();
+                iov[0].iov_len = sizeof(leap_header);
+                iov[1].iov_base = const_cast<uint8_t *>(bytes + segment_offset + processed);
+                iov[1].iov_len = chunk_len;
 
-            processed += chunk_len;
-            chunk_idx++;
+                struct msghdr msg{};
+                msg.msg_name = &next_addr;
+                msg.msg_namelen = sizeof(next_addr);
+                msg.msg_iov = iov;
+                msg.msg_iovlen = 2;
 
-            // Pacing: brief pause every 32 chunks to prevent receiver socket buffer
-            // overflow during large transfers (e.g., KV cache with thousands of chunks).
-            if (total_chunks > 32 && chunk_idx % 32 == 0) {
-                usleep(100);
+                if (sendmsg(sockfd, &msg, 0) < 0) throw std::runtime_error("UDP send next failed");
+
+                processed += chunk_len;
+                chunk_idx++;
+
+                // Pacing: brief pause every 32 chunks to prevent receiver socket buffer
+                // overflow during large transfers (e.g., KV cache with thousands of chunks).
+                if (total_chunks > 32 && chunk_idx % 32 == 0) {
+                    usleep(100);
+                }
             }
+            segment_offset += segment_size;
         }
     }
 
@@ -115,68 +120,13 @@ namespace Inference {
                                            const size_t data_size) {
         if (next_addr.sin_family == 0) throw std::runtime_error("Next address not configured");
 
-        const auto *hdr_bytes = static_cast<const uint8_t *>(header);
-        const auto *dat_bytes = static_cast<const uint8_t *>(data);
+        // Merge header + data and delegate to send_next, which handles
+        // bank-aligned splitting for kernel transport compatibility.
         const size_t total_size = header_size + data_size;
-
-        size_t processed = 0;
-        uint16_t total_chunks = (total_size + LEAP_CHUNK_SIZE - 1) / LEAP_CHUNK_SIZE;
-        uint16_t chunk_idx = 0;
-
-        seq_id++;
-
-        if (packet_buffer.size() < sizeof(leap_header)) packet_buffer.resize(sizeof(leap_header));
-        auto *leap_hdr = reinterpret_cast<leap_header *>(packet_buffer.data());
-
-        while (processed < total_size) {
-            size_t chunk_len = LEAP_CHUNK_SIZE;
-            if (processed + chunk_len > total_size) chunk_len = total_size - processed;
-
-            leap_hdr->magic = htonl(LEAP_MAGIC);
-            leap_hdr->seq_id = htons(seq_id);
-            leap_hdr->chunk_id = htons(chunk_idx);
-            leap_hdr->total_chunks = htons(total_chunks);
-
-            struct iovec iov[3]; // [LeapHdr, AppHdr?, Data?]
-            int iov_cnt = 1;
-            iov[0].iov_base = packet_buffer.data();
-            iov[0].iov_len = sizeof(leap_header);
-
-            size_t space_in_chunk = chunk_len;
-
-            // Part 1: Header (App Layer)
-            if (processed < header_size) {
-                const size_t take = std::min(space_in_chunk, header_size - processed);
-                iov[iov_cnt].iov_base = const_cast<uint8_t *>(hdr_bytes + processed);
-                iov[iov_cnt].iov_len = take;
-                iov_cnt++;
-                space_in_chunk -= take;
-            }
-
-            // Part 2: Data
-            if (space_in_chunk > 0) {
-                const size_t data_processed = (processed >= header_size) ? (processed - header_size) : 0;
-                iov[iov_cnt].iov_base = const_cast<uint8_t *>(dat_bytes + data_processed);
-                iov[iov_cnt].iov_len = space_in_chunk;
-                iov_cnt++;
-            }
-
-            struct msghdr msg{};
-            msg.msg_name = &next_addr;
-            msg.msg_namelen = sizeof(next_addr);
-            msg.msg_iov = iov;
-            msg.msg_iovlen = iov_cnt;
-
-            if (sendmsg(sockfd, &msg, 0) < 0) throw std::runtime_error("UDP send multipart failed");
-
-            processed += chunk_len;
-            chunk_idx++;
-
-            // Pacing: same as send_next — prevent receiver buffer overflow
-            if (total_chunks > 32 && chunk_idx % 32 == 0) {
-                usleep(100);
-            }
-        }
+        std::vector<uint8_t> buffer(total_size);
+        std::memcpy(buffer.data(), header, header_size);
+        std::memcpy(buffer.data() + header_size, data, data_size);
+        send_next(buffer.data(), total_size);
     }
 
     void UdpTransport::recv_next(void *data, size_t size) {
@@ -188,73 +138,79 @@ namespace Inference {
     }
 
     void UdpTransport::recv_prev(void *data, const size_t size) {
-        const size_t expected_chunks = (size + LEAP_CHUNK_SIZE - 1) / LEAP_CHUNK_SIZE;
-        std::vector<bool> received_chunks(expected_chunks, false);
-        size_t chunks_count = 0;
         auto *out_bytes = static_cast<uint8_t *>(data);
-        int32_t active_seq_id = -1;
 
         // Use poll-based timeout to prevent hanging forever on lost packets.
-        // For single-chunk receives (normal inference), the first poll is generous.
-        // For multi-chunk receives (KV transfer), use a per-chunk timeout.
         constexpr int RECV_TIMEOUT_MS = 10000;  // 10s total timeout for stalled receives
 
-        while (chunks_count < expected_chunks) {
-            sockaddr_in src_addr{};
-            socklen_t addr_len = sizeof(src_addr);
+        // Receive in LEAP_RX_BANK_SIZE segments to match the bank-aligned
+        // splitting in send_next. Each segment has its own seq_id.
+        size_t total_received = 0;
+        while (total_received < size) {
+            const size_t segment_size = std::min(size - total_received, static_cast<size_t>(LEAP_RX_BANK_SIZE));
+            const size_t expected_chunks = (segment_size + LEAP_CHUNK_SIZE - 1) / LEAP_CHUNK_SIZE;
+            std::vector<bool> received_chunks(expected_chunks, false);
+            size_t chunks_count = 0;
+            int32_t active_seq_id = -1;
 
-            // Reuse packet_buffer for receive
-            if (packet_buffer.size() < 2048) packet_buffer.resize(2048);
+            while (chunks_count < expected_chunks) {
+                sockaddr_in src_addr{};
+                socklen_t addr_len = sizeof(src_addr);
 
-            // Poll with timeout to detect stalled transfers
-            struct pollfd pfd{};
-            pfd.fd = sockfd;
-            pfd.events = POLLIN;
-            int poll_ret = poll(&pfd, 1, RECV_TIMEOUT_MS);
-            if (poll_ret == 0) {
-                // Timeout: no data received for RECV_TIMEOUT_MS
-                throw std::runtime_error("UDP recv_prev timeout: received " + 
-                    std::to_string(chunks_count) + "/" + std::to_string(expected_chunks) + 
-                    " chunks (" + std::to_string(size) + " bytes expected)");
+                // Reuse packet_buffer for receive
+                if (packet_buffer.size() < 2048) packet_buffer.resize(2048);
+
+                // Poll with timeout to detect stalled transfers
+                struct pollfd pfd{};
+                pfd.fd = sockfd;
+                pfd.events = POLLIN;
+                int poll_ret = poll(&pfd, 1, RECV_TIMEOUT_MS);
+                if (poll_ret == 0) {
+                    // Timeout: no data received for RECV_TIMEOUT_MS
+                    throw std::runtime_error("UDP recv_prev timeout: received " + 
+                        std::to_string(chunks_count) + "/" + std::to_string(expected_chunks) + 
+                        " chunks (" + std::to_string(size) + " bytes expected)");
+                }
+                if (poll_ret < 0) throw std::runtime_error("UDP poll failed");
+
+                const ssize_t len = recvfrom(sockfd, packet_buffer.data(), packet_buffer.size(), 0,
+                                             reinterpret_cast<struct sockaddr *>(&src_addr), &addr_len);
+
+                if (len < 0) throw std::runtime_error("UDP recv prev failed");
+
+                // Learn Prev Addr (optional, just logging or verification)
+                if (!prev_addr_set) {
+                    prev_addr = src_addr;
+                    prev_addr_set = true;
+                }
+
+                if (static_cast<size_t>(len) < sizeof(leap_header)) continue;
+
+                auto *hdr = reinterpret_cast<leap_header *>(packet_buffer.data());
+                if (ntohl(hdr->magic) != LEAP_MAGIC) continue;
+
+                const uint16_t seq = ntohs(hdr->seq_id);
+                const uint16_t chunk = ntohs(hdr->chunk_id);
+
+                if (active_seq_id == -1) {
+                    active_seq_id = seq;
+                } else if (seq != active_seq_id) {
+                    continue;
+                }
+
+                if (chunk >= expected_chunks) continue;
+                if (received_chunks[chunk]) continue;
+
+                size_t payload_len = len - sizeof(leap_header);
+                size_t offset = total_received + chunk * LEAP_CHUNK_SIZE;
+
+                if (offset + payload_len > size) payload_len = size - offset;
+
+                std::memcpy(out_bytes + offset, packet_buffer.data() + sizeof(leap_header), payload_len);
+                received_chunks[chunk] = true;
+                chunks_count++;
             }
-            if (poll_ret < 0) throw std::runtime_error("UDP poll failed");
-
-            const ssize_t len = recvfrom(sockfd, packet_buffer.data(), packet_buffer.size(), 0,
-                                         reinterpret_cast<struct sockaddr *>(&src_addr), &addr_len);
-
-            if (len < 0) throw std::runtime_error("UDP recv prev failed");
-
-            // Learn Prev Addr (optional, just logging or verification)
-            if (!prev_addr_set) {
-                prev_addr = src_addr;
-                prev_addr_set = true;
-            }
-
-            if (static_cast<size_t>(len) < sizeof(leap_header)) continue;
-
-            auto *hdr = reinterpret_cast<leap_header *>(packet_buffer.data());
-            if (ntohl(hdr->magic) != LEAP_MAGIC) continue;
-
-            const uint16_t seq = ntohs(hdr->seq_id);
-            const uint16_t chunk = ntohs(hdr->chunk_id);
-
-            if (active_seq_id == -1) {
-                active_seq_id = seq;
-            } else if (seq != active_seq_id) {
-                continue;
-            }
-
-            if (chunk >= expected_chunks) continue;
-            if (received_chunks[chunk]) continue;
-
-            size_t payload_len = len - sizeof(leap_header);
-            size_t offset = chunk * LEAP_CHUNK_SIZE;
-
-            if (offset + payload_len > size) payload_len = size - offset;
-
-            std::memcpy(out_bytes + offset, packet_buffer.data() + sizeof(leap_header), payload_len);
-            received_chunks[chunk] = true;
-            chunks_count++;
+            total_received += segment_size;
         }
     }
 

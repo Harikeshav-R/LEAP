@@ -8,6 +8,7 @@
 #include <cstring>
 #include <algorithm>
 #include <poll.h>
+#include <chrono>
 
 // Set to 1 to enable verbose UDP debug logging
 #define UDP_DEBUG 1
@@ -139,10 +140,15 @@ namespace Inference {
                 processed += chunk_len;
                 chunk_idx++;
 
-                // Pacing: brief pause every 32 chunks to prevent receiver socket buffer
-                // overflow during large transfers (e.g., KV cache with thousands of chunks).
-                if (total_chunks > 32 && chunk_idx % 32 == 0) {
-                    usleep(100);
+                // Pacing: brief pause between chunks to prevent receiver socket buffer
+                // overflow. Virtual NICs (Mac host to Linux VM) are especially prone
+                // to dropping back-to-back UDP packets.
+                if (total_chunks > 1) {
+                    if (total_chunks > 32 && chunk_idx % 32 == 0) {
+                        usleep(200);   // Longer pause for large transfers
+                    } else {
+                        usleep(50);    // 50μs between chunks — negligible latency, prevents drops
+                    }
                 }
             }
             segment_offset += segment_size;
@@ -173,11 +179,16 @@ namespace Inference {
     void UdpTransport::recv_prev(void *data, const size_t size) {
         auto *out_bytes = static_cast<uint8_t *>(data);
 
-        // Use poll-based timeout to prevent hanging forever on lost packets.
-        constexpr int RECV_TIMEOUT_MS = 10000;  // 10s total timeout for stalled receives
+        // Overall deadline: 10s from start of recv_prev.
+        // Per-poll timeout: 500ms — short enough to detect partial delivery
+        // instead of blocking on a single 10s poll where one lost packet = total hang.
+        constexpr int OVERALL_TIMEOUT_MS = 10000;
+        constexpr int POLL_TIMEOUT_MS = 500;
 
         UDP_LOG("recv_prev: waiting for %zu bytes (%zu chunks)",
                 size, (size + LEAP_CHUNK_SIZE - 1) / LEAP_CHUNK_SIZE);
+
+        auto start_time = std::chrono::steady_clock::now();
 
         // Receive in LEAP_RX_BANK_SIZE segments to match the bank-aligned
         // splitting in send_next. Each segment has its own seq_id.
@@ -191,24 +202,36 @@ namespace Inference {
             int stale_packets = 0;
 
             while (chunks_count < expected_chunks) {
+                // Check overall deadline
+                auto now = std::chrono::steady_clock::now();
+                auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - start_time).count();
+                if (elapsed_ms >= OVERALL_TIMEOUT_MS) {
+                    UDP_LOG("recv_prev TIMEOUT: %zu/%zu chunks, active_seq=%d, stale_dropped=%d, elapsed=%lldms",
+                            chunks_count, expected_chunks, active_seq_id, stale_packets, elapsed_ms);
+                    throw std::runtime_error("UDP recv_prev timeout: received " + 
+                        std::to_string(chunks_count) + "/" + std::to_string(expected_chunks) + 
+                        " chunks (" + std::to_string(size) + " bytes expected)");
+                }
+
                 sockaddr_in src_addr{};
                 socklen_t addr_len = sizeof(src_addr);
 
                 // Reuse packet_buffer for receive
                 if (packet_buffer.size() < 2048) packet_buffer.resize(2048);
 
-                // Poll with timeout to detect stalled transfers
+                // Short poll: allows us to check the overall deadline frequently
+                // instead of blocking for the full 10s on a single poll call.
                 struct pollfd pfd{};
                 pfd.fd = sockfd;
                 pfd.events = POLLIN;
-                int poll_ret = poll(&pfd, 1, RECV_TIMEOUT_MS);
+                int poll_ret = poll(&pfd, 1, POLL_TIMEOUT_MS);
                 if (poll_ret == 0) {
-                    // Timeout: no data received for RECV_TIMEOUT_MS
-                    UDP_LOG("recv_prev TIMEOUT: %zu/%zu chunks, active_seq=%d, stale_dropped=%d",
-                            chunks_count, expected_chunks, active_seq_id, stale_packets);
-                    throw std::runtime_error("UDP recv_prev timeout: received " + 
-                        std::to_string(chunks_count) + "/" + std::to_string(expected_chunks) + 
-                        " chunks (" + std::to_string(size) + " bytes expected)");
+                    // Short timeout: no packet in 500ms. Log and retry until overall deadline.
+                    if (chunks_count > 0) {
+                        UDP_LOG("recv_prev: partial receive (%zu/%zu chunks), still waiting...",
+                                chunks_count, expected_chunks);
+                    }
+                    continue;  // Check overall deadline at top of loop
                 }
                 if (poll_ret < 0) throw std::runtime_error("UDP poll failed");
 
@@ -248,8 +271,6 @@ namespace Inference {
                 } else if (seq != static_cast<uint16_t>(active_seq_id)) {
                     // Check if this is a NEWER seq_id (sender moved on).
                     // If so, reset and start collecting the new sequence.
-                    // This handles the case where stale packets from a previous
-                    // send are still in the buffer.
                     auto seq_diff = static_cast<int16_t>(seq - static_cast<uint16_t>(active_seq_id));
                     if (seq_diff > 0) {
                         // Newer sequence - reset and start fresh
@@ -258,7 +279,6 @@ namespace Inference {
                         active_seq_id = seq;
                         std::fill(received_chunks.begin(), received_chunks.end(), false);
                         chunks_count = 0;
-                        // Fall through to process this chunk
                     } else {
                         // Older/stale sequence - discard
                         stale_packets++;

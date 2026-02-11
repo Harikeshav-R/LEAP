@@ -22,21 +22,13 @@ LEAP solves the "VRAM Wall" problem. Instead of requiring a single expensive GPU
 
 LEAP consists of five components that form an end-to-end pipeline:
 
-```
-┌──────────────┐    ┌──────────────┐    ┌────────────────────────────────────┐
-│   Exporter   │    │  Tokenizer   │    │        Inference Engine            │
-│              │    │              │    │                                    │
-│ Safetensors  │───▶│ tiktoken     │───▶│  FloatTransformer (FP32)          │
-│ → LEAP .bin  │    │ → tokenizer  │    │  QuantizedTransformer (W8A8 INT8) │
-│ (FP32/INT8)  │    │   .bin       │    │  Transport (TCP/UDP/Kernel)       │
-└──────────────┘    └──────────────┘    └────────────────────────────────────┘
-                                                        │
-                                                 Ring Topology
-                                                        │
-                                         ┌──────────────┴──────────────┐
-                                         │     Worker Nodes (N-1)      │
-                                         │  Each runs assigned layers  │
-                                         └─────────────────────────────┘
+```mermaid
+graph TD
+    Exporter["<b>Exporter</b><br/>Safetensors ➔ LEAP .bin<br/>(FP32/INT8)"] --> Tokenizer["<b>Tokenizer</b><br/>tiktoken ➔ tokenizer.bin"]
+    Tokenizer --> Engine["<b>Inference Engine</b><br/>FloatTransformer (FP32)<br/>QuantizedTransformer (W8A8 INT8)<br/>Transport (TCP/UDP/Kernel)"]
+    
+    Engine --- Ring((Ring Topology))
+    Ring --- Workers["<b>Worker Nodes (N-1)</b><br/>Each runs assigned layers"]
 ```
 
 1. **Exporter** (`src/export/`) — Converts PyTorch/Safetensors models into LEAP's optimized binary format (FP32 or INT8 quantized).
